@@ -1,7 +1,9 @@
 """Floating Wispr Flow-style microphone pill UI for AuroraMic using Win32 per-pixel alpha.
 
-The right-click "Quit AuroraMic" menu is a custom dark-glass layered popup (not a native
-Windows menu) that dismisses on any outside click, Escape, or foreground-window change.
+The right-click menu ("Quit AuroraMic" and "Enter/Update Groq API key") is a custom dark-glass
+layered popup (not a native Windows menu) that dismisses on any outside click, Escape, or
+foreground-window change. The bottom pill morphs between the live waveform bar, inline error
+toasts, and the in-place Groq API key input container.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import threading
 import time
 import tkinter as tk
 from typing import Callable
+import webbrowser
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -31,6 +34,34 @@ BAR_PILL_HEIGHT = 44.0
 BAR_CENTER_X = TOP_CENTER_X
 BAR_CENTER_Y = TOP_CENTER_Y + 37.0 + 10.0 + 22.0  # 119.0 (10px gap below 74px stop button)
 
+TOAST_PILL_WIDTH = 188.0  # max width; leaves 16px margin each side for 13px glow + shake
+TOAST_MIN_WIDTH = 128.0
+TOAST_PILL_HEIGHT = 38.0
+TOAST_CENTER_Y = TOP_CENTER_Y + 37.0 + 10.0 + 19.0  # 116.0 (10px gap below 74px ring)
+TOAST_MAX_TEXT_WIDTH = 156.0
+TOAST_HORIZONTAL_PADDING = 36.0
+TOAST_FONT_PX = 12
+
+GROQ_SIGNUP_URL = "https://console.groq.com/keys"
+API_KEY_SIGNUP_LABEL = "Sign up for a free Groq API key"
+API_KEY_PILL_WIDTH = 194.0
+API_KEY_PILL_HEIGHT = 55.0
+API_KEY_CENTER_Y = TOP_CENTER_Y + 37.0 + 10.0 + 27.5  # 124.5 (10px gap below 74px ring)
+API_KEY_PILL_RADIUS = 16.0
+API_KEY_INPUT_LEFT = 22.0
+API_KEY_INPUT_RIGHT = 144.0
+API_KEY_INPUT_ROW_CY = 114.0
+API_KEY_SAVE_CX = 158.0
+API_KEY_CANCEL_CX = 184.5
+API_KEY_BTN_R = 10.5
+API_KEY_SIGNUP_CY = 136.5
+API_KEY_SIGNUP_HW = 79.0
+API_KEY_SIGNUP_HH = 8.0
+API_KEY_ENTRY_X = 26
+API_KEY_ENTRY_Y = 106
+API_KEY_ENTRY_W = 114
+API_KEY_ENTRY_H = 16
+
 SEND_TAB_LEFT = 118.0
 SEND_TAB_RIGHT = 188.0
 SEND_TAB_CENTER_X = 0.5 * (SEND_TAB_LEFT + SEND_TAB_RIGHT)
@@ -43,7 +74,7 @@ MAX_RECORD_SECONDS = 60.0
 FRAME_INTERVAL_MS = 16
 DRAG_THRESHOLD_PX = 5.0
 SUCCESS_DURATION_MS = 450
-ERROR_DURATION_MS = 1200
+ERROR_DURATION_MS = 2600
 
 # Win32 constants for layered per-pixel alpha rendering.
 GWL_EXSTYLE = -20
@@ -71,6 +102,11 @@ ACCENT_TRANSCRIBING_B_RGB = (112, 161, 255)
 ACCENT_SUCCESS_RGB = (46, 213, 115)
 ACCENT_ERROR_AMBER_RGB = (255, 165, 2)
 ACCENT_ERROR_RED_RGB = (255, 71, 87)
+ACCENT_API_KEY_A_RGB = (56, 168, 255)
+ACCENT_API_KEY_B_RGB = (0, 229, 255)
+API_KEY_WELL_FILL_RGB = (16, 18, 24)
+API_KEY_SIGNUP_RGB = (112, 161, 255)
+API_KEY_SIGNUP_HOVER_RGB = (185, 232, 255)
 TIMER_TEXT_RGB = (230, 232, 240)
 TIMER_URGENT_RGB = (255, 107, 120)
 CANCEL_ICON_RGB = (204, 208, 220)
@@ -81,13 +117,20 @@ SEND_ICON_HOVER_RGB = (56, 168, 255)
 SEND_ICON_FLASH_RGB = (155, 220, 255)
 WHITE_RGB = (255, 255, 255)
 
-# Custom dark-glass "Quit AuroraMic" right-click popup.
+# Custom dark-glass right-click popup ("Quit AuroraMic" + Groq API key option).
 QUIT_LABEL = "Quit AuroraMic"
-QUIT_WIN_W = 168
-QUIT_WIN_H = 58
-QUIT_PILL_W = 146.0
-QUIT_PILL_H = 36.0
-QUIT_PILL_RADIUS = 13.0
+API_KEY_ENTER_LABEL = "Enter Groq API key"
+API_KEY_UPDATE_LABEL = "Update Groq API key"
+QUIT_WIN_W = 198
+QUIT_WIN_H = 100
+QUIT_PILL_W = 176.0
+QUIT_PILL_H = 78.0
+QUIT_PILL_RADIUS = 14.0
+QUIT_ROW_H = 32.0
+QUIT_ROW_GAP = 4.0
+QUIT_PAD_Y = 5.0
+QUIT_ROW_INSET_X = 5.0
+QUIT_ROW_RADIUS = 9.0
 QUIT_OPEN_SECONDS = 0.14
 QUIT_FILL_RGB = (17, 19, 27)  # #11131B
 QUIT_FILL_HOVER_RGB = (35, 24, 32)  # #231820
@@ -97,6 +140,11 @@ QUIT_GLYPH_RGB = (205, 210, 224)
 QUIT_GLYPH_HOVER_RGB = (255, 214, 218)
 QUIT_TEXT_RGB = (226, 229, 238)
 QUIT_TEXT_HOVER_RGB = (255, 240, 241)
+MENU_DIVIDER_RGB = (42, 46, 62)
+MENU_KEY_FILL_HOVER_RGB = (20, 31, 44)
+MENU_KEY_BORDER_HOVER_RGB = (56, 168, 255)
+MENU_KEY_GLYPH_HOVER_RGB = (180, 232, 255)
+MENU_KEY_TEXT_HOVER_RGB = (232, 247, 255)
 
 VK_LBUTTON = 0x01
 VK_RBUTTON = 0x02
@@ -107,7 +155,7 @@ SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
 
-VALID_STATES = frozenset({"idle", "recording", "transcribing", "success", "error"})
+VALID_STATES = frozenset({"idle", "recording", "transcribing", "success", "error", "api_key"})
 
 # 9-bar bell envelope gives speech waveforms an organic center focus.
 BAR_ENVELOPE = (0.55, 0.72, 0.88, 0.98, 1.0, 0.98, 0.88, 0.72, 0.55)
@@ -290,6 +338,29 @@ def _sdf_bottom_semicircle_arc(
     return centerline_dist - half_width
 
 
+def _sdf_key_glyph(
+    px: np.ndarray,
+    py: np.ndarray,
+    cx: float,
+    cy: float,
+    scale: float = 1.0,
+) -> np.ndarray:
+    """Analytical signed distance to a horizontal key glyph (bow ring + blade + 2 teeth)."""
+    hs = 0.88 * (scale ** 0.72)
+    bow_x = cx - 3.3 * scale
+    shaft_y = cy - 0.3 * scale
+    bow_r = 2.55 * scale
+    d_bow = np.abs(np.hypot(px - bow_x, py - shaft_y) - bow_r) - hs
+    d_shaft = _sdf_segment(
+        px, py, bow_x + bow_r - 0.1 * scale, shaft_y, cx + 5.1 * scale, shaft_y, hs
+    )
+    t1x = cx + 2.5 * scale
+    t2x = cx + 4.85 * scale
+    d_t1 = _sdf_segment(px, py, t1x, shaft_y, t1x, shaft_y + 2.4 * scale, hs)
+    d_t2 = _sdf_segment(px, py, t2x, shaft_y, t2x, shaft_y + 3.0 * scale, hs)
+    return np.minimum(np.minimum(d_bow, d_shaft), np.minimum(d_t1, d_t2))
+
+
 def _sdf_cov(d: np.ndarray) -> np.ndarray:
     """Convert SDF distance into sub-pixel coverage in [0, 1]."""
     return np.clip(0.5 - d, 0.0, 1.0).astype(np.float32)
@@ -340,7 +411,7 @@ def _load_label_font(size_px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFo
 
 
 class _QuitPopup:
-    """Non-activating, per-pixel-alpha dark-glass 'Quit AuroraMic' popup window."""
+    """Non-activating, per-pixel-alpha dark-glass right-click menu ('Quit AuroraMic' & Groq API key)."""
 
     def __init__(self, owner: FloatingMicUI) -> None:
         self._owner = owner
@@ -352,6 +423,9 @@ class _QuitPopup:
         self.visible = False
         self.open_t = 0.0
         self.hover_t = 0.0
+        self.hover_quit_t = 0.0
+        self.hover_key_t = 0.0
+        self._has_key = False
         self._opened_at = 0.0
         self.last_ulw_ok = False
         self.last_ulw_error = 0
@@ -369,9 +443,9 @@ class _QuitPopup:
         self._ulw_pt_zero = wintypes.POINT(0, 0)
         self._ulw_blend = _BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
 
-        self._text_mask = np.zeros((1, 1), dtype=np.float32)
-        self._text_w = 0.0
-        self._build_text_mask()
+        self._text_masks: dict[str, np.ndarray] = {}
+        self._text_widths: dict[str, float] = {}
+        self._build_text_masks()
 
         self.top = tk.Toplevel(owner.root)
         self.top.withdraw()
@@ -476,25 +550,42 @@ class _QuitPopup:
 
     # -- Geometry / lifecycle ------------------------------------------------
 
+    @property
+    def api_key_label(self) -> str:
+        return API_KEY_UPDATE_LABEL if self._has_key else API_KEY_ENTER_LABEL
+
     def pill_rect_screen(self) -> tuple[float, float, float, float]:
         left = self.pos_x + (QUIT_WIN_W - QUIT_PILL_W) * 0.5
         top = self.pos_y + (QUIT_WIN_H - QUIT_PILL_H) * 0.5
         return left, top, left + QUIT_PILL_W, top + QUIT_PILL_H
 
-    def show(self, x: int, y: int) -> None:
+    def quit_item_rect_screen(self) -> tuple[float, float, float, float]:
+        left, top, right, _ = self.pill_rect_screen()
+        y0 = top + QUIT_PAD_Y
+        return (left + QUIT_ROW_INSET_X, y0, right - QUIT_ROW_INSET_X, y0 + QUIT_ROW_H)
+
+    def api_key_item_rect_screen(self) -> tuple[float, float, float, float]:
+        left, top, right, _ = self.pill_rect_screen()
+        y0 = top + QUIT_PAD_Y + QUIT_ROW_H + QUIT_ROW_GAP
+        return (left + QUIT_ROW_INSET_X, y0, right - QUIT_ROW_INSET_X, y0 + QUIT_ROW_H)
+
+    def show(self, x: int, y: int, has_key: bool = False) -> None:
         self.pos_x = int(x)
         self.pos_y = int(y)
         self.open_t = 0.0
         self.hover_t = 0.0
+        self.hover_quit_t = 0.0
+        self.hover_key_t = 0.0
+        self._has_key = bool(has_key)
         self._opened_at = time.perf_counter()
-        self.draw(0.0, 0.0)
+        self.draw(0.0, 0.0, 0.0)
         self.top.geometry(f"{QUIT_WIN_W}x{QUIT_WIN_H}+{self.pos_x}+{self.pos_y}")
         self.top.deiconify()
         self.top.attributes("-topmost", True)
         self.top.update_idletasks()
         self.refresh_hwnd_style()
         self.visible = True
-        self.draw(0.0, 0.0)
+        self.draw(0.0, 0.0, 0.0)
 
     def hide(self) -> None:
         self.visible = False
@@ -503,50 +594,82 @@ class _QuitPopup:
         except tk.TclError:
             pass
 
-    def tick(self, now: float, dt: float, hovered: bool) -> None:
+    def tick(self, now: float, dt: float, hover_quit: bool, hover_key: bool = False) -> None:
         if not self.visible:
             return
         changed = False
         if self.open_t < 1.0:
             self.open_t = _clamp((now - self._opened_at) / QUIT_OPEN_SECONDS, 0.0, 1.0)
             changed = True
-        target = 1.0 if hovered else 0.0
-        if abs(self.hover_t - target) > 0.002:
-            self.hover_t += (target - self.hover_t) * (1.0 - math.exp(-18.0 * dt))
-            changed = True
-        elif self.hover_t != target:
-            self.hover_t = target
-            changed = True
+        for attr, hovered in (("hover_quit_t", hover_quit), ("hover_key_t", hover_key)):
+            cur = getattr(self, attr)
+            target = 1.0 if hovered else 0.0
+            if abs(cur - target) > 0.002:
+                setattr(self, attr, cur + (target - cur) * (1.0 - math.exp(-18.0 * dt)))
+                changed = True
+            elif cur != target:
+                setattr(self, attr, target)
+                changed = True
+        self.hover_t = max(self.hover_quit_t, self.hover_key_t)
         if changed:
-            self.draw(self.open_t, self.hover_t)
+            self.draw(self.open_t, self.hover_quit_t, self.hover_key_t)
 
     # -- Rendering -------------------------------------------------------------
 
-    def _build_text_mask(self) -> None:
+    def _build_text_masks(self) -> None:
         ss = 4
         font = _load_label_font(12 * ss)
         probe = ImageDraw.Draw(Image.new("L", (1, 1), 0))
-        bbox = probe.textbbox((0, 0), QUIT_LABEL, font=font)
         ref = probe.textbbox((0, 0), "AEx", font=font)
-        self._text_w = (bbox[2] - bbox[0]) / ss
-        tw = int(math.ceil(self._text_w)) + 4
         th = 20
-        img = Image.new("L", (tw * ss, th * ss), 0)
-        ImageDraw.Draw(img).text(
-            (2 * ss - bbox[0], th * ss * 0.5 - (ref[1] + ref[3]) * 0.5),
-            QUIT_LABEL,
-            fill=255,
-            font=font,
-        )
-        small = img.resize((tw, th), Image.Resampling.LANCZOS)
-        self._text_mask = (np.asarray(small, dtype=np.float32) / 255.0).copy()
+        for label in (QUIT_LABEL, API_KEY_ENTER_LABEL, API_KEY_UPDATE_LABEL):
+            bbox = probe.textbbox((0, 0), label, font=font)
+            text_w = (bbox[2] - bbox[0]) / ss
+            tw = int(math.ceil(text_w)) + 4
+            img = Image.new("L", (tw * ss, th * ss), 0)
+            ImageDraw.Draw(img).text(
+                (2 * ss - bbox[0], th * ss * 0.5 - (ref[1] + ref[3]) * 0.5),
+                label,
+                fill=255,
+                font=font,
+            )
+            small = img.resize((tw, th), Image.Resampling.LANCZOS)
+            self._text_widths[label] = text_w
+            self._text_masks[label] = (np.asarray(small, dtype=np.float32) / 255.0).copy()
 
-    def render(self, open_t: float, hover_t: float) -> np.ndarray:
+    def _blit_text_mask(
+        self,
+        rgb_pm: np.ndarray,
+        a: np.ndarray,
+        mask: np.ndarray,
+        x0: int,
+        y0: int,
+        text_rgb: tuple[float, float, float],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        mh, mw = mask.shape
+        dx0, dy0 = max(0, x0), max(0, y0)
+        dx1, dy1 = min(QUIT_WIN_W, x0 + mw), min(QUIT_WIN_H, y0 + mh)
+        if dx0 >= dx1 or dy0 >= dy1:
+            return rgb_pm, a
+        sx0, sy0 = dx0 - x0, dy0 - y0
+        tmask = np.zeros((QUIT_WIN_H, QUIT_WIN_W), dtype=np.float32)
+        tmask[dy0:dy1, dx0:dx1] = mask[sy0 : sy0 + (dy1 - dy0), sx0 : sx0 + (dx1 - dx0)]
+        return _composite_premul(rgb_pm, a, text_rgb, tmask)
+
+    def render(
+        self,
+        open_t: float,
+        hover_quit_t: float,
+        hover_key_t: float = 0.0,
+        has_key: bool | None = None,
+    ) -> np.ndarray:
         """Render premultiplied BGRA (H, W, 4) uint8."""
         w, h = QUIT_WIN_W, QUIT_WIN_H
         px, py = self._px, self._py
         e = 1.0 - (1.0 - _clamp(open_t, 0.0, 1.0)) ** 3
-        hover_t = _clamp(hover_t, 0.0, 1.0)
+        hover_quit_t = _clamp(hover_quit_t, 0.0, 1.0)
+        hover_key_t = _clamp(hover_key_t, 0.0, 1.0)
+        use_has_key = self._has_key if has_key is None else bool(has_key)
         scale = 0.94 + 0.06 * e
         cx, cy = w * 0.5, h * 0.5
         hw = QUIT_PILL_W * 0.5 * scale
@@ -562,55 +685,100 @@ class _QuitPopup:
         shadow_a = (np.clip(1.0 - d_shadow / 8.0, 0.0, 1.0) ** 2 * 0.36).astype(np.float32)
         rgb_pm, a = _composite_premul(rgb_pm, a, (0.0, 0.0, 0.0), shadow_a)
 
-        if hover_t > 0.001:
-            glow_a = (np.clip(1.0 - d / 8.0, 0.0, 1.0) ** 2.4 * 0.45 * hover_t).astype(np.float32)
+        if hover_quit_t > 0.001 or hover_key_t > 0.001:
+            glow_base = np.clip(1.0 - d / 8.0, 0.0, 1.0) ** 2.4 * 0.34
+            if hover_quit_t >= hover_key_t:
+                glow_col = QUIT_BORDER_HOVER_RGB
+                glow_w = hover_quit_t
+            else:
+                glow_col = MENU_KEY_BORDER_HOVER_RGB
+                glow_w = hover_key_t
+            glow_a = (glow_base * glow_w).astype(np.float32)
             rgb_pm, a = _composite_premul(
-                rgb_pm, a, tuple(float(c) for c in QUIT_BORDER_HOVER_RGB), glow_a
+                rgb_pm, a, tuple(float(c) for c in glow_col), glow_a
             )
 
-        border = tuple(float(c) for c in _lerp_rgb(QUIT_BORDER_RGB, QUIT_BORDER_HOVER_RGB, hover_t))
-        fill = tuple(float(c) for c in _lerp_rgb(QUIT_FILL_RGB, QUIT_FILL_HOVER_RGB, hover_t))
+        border_rgb = QUIT_BORDER_RGB
+        if hover_quit_t > 0.001:
+            border_rgb = _lerp_rgb(border_rgb, QUIT_BORDER_HOVER_RGB, hover_quit_t * 0.35)
+        if hover_key_t > 0.001:
+            border_rgb = _lerp_rgb(border_rgb, MENU_KEY_BORDER_HOVER_RGB, hover_key_t * 0.35)
+        border = tuple(float(c) for c in border_rgb)
+        fill = tuple(float(c) for c in QUIT_FILL_RGB)
         rgb_pm, a = _composite_premul(rgb_pm, a, border, _sdf_cov(d))
         rgb_pm, a = _composite_premul(rgb_pm, a, fill, _sdf_cov(d + 1.25) * 0.97)
 
-        if hover_t > 0.001:
-            inner_a = (
-                _sdf_cov(d + 1.25) * np.clip(1.0 + d / 6.0, 0.0, 1.0) ** 2 * 0.18 * hover_t
-            ).astype(np.float32)
-            rgb_pm, a = _composite_premul(
-                rgb_pm, a, tuple(float(c) for c in QUIT_BORDER_HOVER_RGB), inner_a
-            )
+        # Row geometry (Row 0: Quit AuroraMic, Row 1: Enter/Update Groq API key).
+        row_hw = (QUIT_PILL_W * 0.5 - QUIT_ROW_INSET_X) * scale
+        row_hh = QUIT_ROW_H * 0.5 * scale
+        row_rad = QUIT_ROW_RADIUS * scale
+        row_offset = 0.5 * (QUIT_ROW_H + QUIT_ROW_GAP) * scale
+        row0_cy = cy - row_offset
+        row1_cy = cy + row_offset
 
-        # Power glyph (broken ring + top stem) and label, centered as a group.
-        group_w = 14.0 + 9.0 + self._text_w
-        left = cx - group_w * 0.5
-        icx = left + 7.0
-        icy = cy + 0.7
-        ring_r = 6.1
-        half_w = 0.95
+        # Hairline divider between rows.
+        d_div = _sdf_segment(px, py, cx - (row_hw - 6.0), cy, cx + (row_hw - 6.0), cy, 0.45)
+        div_cov = (_sdf_cov(d_div) * 0.55 * (1.0 - 0.5 * max(hover_quit_t, hover_key_t))).astype(np.float32)
+        rgb_pm, a = _composite_premul(
+            rgb_pm, a, tuple(float(c) for c in MENU_DIVIDER_RGB), div_cov
+        )
+
+        # Row hover cards.
+        for row_cy, ht, fill_h, border_h in (
+            (row0_cy, hover_quit_t, QUIT_FILL_HOVER_RGB, QUIT_BORDER_HOVER_RGB),
+            (row1_cy, hover_key_t, MENU_KEY_FILL_HOVER_RGB, MENU_KEY_BORDER_HOVER_RGB),
+        ):
+            if ht <= 0.001:
+                continue
+            d_row = _sdf_rounded_box(px, py, cx, row_cy, row_hw, row_hh, row_rad)
+            r_fill = tuple(float(c) for c in fill_h)
+            r_border = tuple(float(c) for c in border_h)
+            rgb_pm, a = _composite_premul(rgb_pm, a, r_fill, _sdf_cov(d_row) * 0.95 * ht)
+            border_ring = _sdf_cov(np.abs(d_row + 0.5) - 0.5) * 0.55 * ht
+            rgb_pm, a = _composite_premul(rgb_pm, a, r_border, border_ring.astype(np.float32))
+
+        card_left = cx - hw
+        icx = card_left + 21.0 * scale
+        text_x0 = int(round(card_left + 34.0 * scale - 2.0))
+
+        # Row 0 icon (power glyph) & label ("Quit AuroraMic").
+        icy0 = row0_cy + 0.5 * scale
+        ring_r = 5.6 * scale
+        half_w = 0.9 * scale
         theta = math.radians(38.0)
         dx = px - icx
-        dy = py - icy
+        dy = py - icy0
         ring_d = np.abs(np.hypot(dx, dy) - ring_r) - half_w
         c1x, c2x = icx - ring_r * math.sin(theta), icx + ring_r * math.sin(theta)
-        cap_y = icy - ring_r * math.cos(theta)
-        cap_d = (
-            np.minimum(np.hypot(px - c1x, py - cap_y), np.hypot(px - c2x, py - cap_y)) - half_w
-        )
+        cap_y = icy0 - ring_r * math.cos(theta)
+        cap_d = np.minimum(np.hypot(px - c1x, py - cap_y), np.hypot(px - c2x, py - cap_y)) - half_w
         in_wedge = (dy < 0.0) & (np.abs(dx) < -dy * math.tan(theta))
         arc_d = np.where(in_wedge, cap_d, ring_d)
-        stem_d = _sdf_segment(px, py, icx, icy - ring_r - 1.5, icx, icy - 0.6, half_w)
-        glyph_cov = _sdf_cov(np.minimum(arc_d, stem_d)) * np.clip(e * 1.0, 0.0, 1.0)
-        glyph_rgb = tuple(float(c) for c in _lerp_rgb(QUIT_GLYPH_RGB, QUIT_GLYPH_HOVER_RGB, hover_t))
-        rgb_pm, a = _composite_premul(rgb_pm, a, glyph_rgb, glyph_cov.astype(np.float32))
+        stem_d = _sdf_segment(px, py, icx, icy0 - ring_r - 1.4 * scale, icx, icy0 - 0.5 * scale, half_w)
+        glyph0_cov = _sdf_cov(np.minimum(arc_d, stem_d))
+        glyph0_rgb = tuple(float(c) for c in _lerp_rgb(QUIT_GLYPH_RGB, QUIT_GLYPH_HOVER_RGB, hover_quit_t))
+        rgb_pm, a = _composite_premul(rgb_pm, a, glyph0_rgb, glyph0_cov.astype(np.float32))
 
-        tmask = np.zeros((h, w), dtype=np.float32)
-        th_, tw_ = self._text_mask.shape
-        x0 = int(round(left + 23.0 - 2.0))
-        y0 = int(round(cy - th_ * 0.5))
-        tmask[y0 : y0 + th_, x0 : x0 + tw_] = self._text_mask
-        text_rgb = tuple(float(c) for c in _lerp_rgb(QUIT_TEXT_RGB, QUIT_TEXT_HOVER_RGB, hover_t))
-        rgb_pm, a = _composite_premul(rgb_pm, a, text_rgb, tmask)
+        qmask = self._text_masks[QUIT_LABEL]
+        q_y0 = int(round(row0_cy - qmask.shape[0] * 0.5))
+        qtext_rgb = tuple(float(c) for c in _lerp_rgb(QUIT_TEXT_RGB, QUIT_TEXT_HOVER_RGB, hover_quit_t))
+        rgb_pm, a = self._blit_text_mask(rgb_pm, a, qmask, text_x0, q_y0, qtext_rgb)
+
+        # Row 1 icon (key glyph) & label ("Enter Groq API key" / "Update Groq API key").
+        d_key = _sdf_key_glyph(px, py, icx, row1_cy + 0.3 * scale, scale=1.05 * scale)
+        glyph1_cov = _sdf_cov(d_key)
+        glyph1_rgb = tuple(
+            float(c) for c in _lerp_rgb(QUIT_GLYPH_RGB, MENU_KEY_GLYPH_HOVER_RGB, hover_key_t)
+        )
+        rgb_pm, a = _composite_premul(rgb_pm, a, glyph1_rgb, glyph1_cov.astype(np.float32))
+
+        klabel = API_KEY_UPDATE_LABEL if use_has_key else API_KEY_ENTER_LABEL
+        kmask = self._text_masks[klabel]
+        k_y0 = int(round(row1_cy - kmask.shape[0] * 0.5))
+        ktext_rgb = tuple(
+            float(c) for c in _lerp_rgb(QUIT_TEXT_RGB, MENU_KEY_TEXT_HOVER_RGB, hover_key_t)
+        )
+        rgb_pm, a = self._blit_text_mask(rgb_pm, a, kmask, text_x0, k_y0, ktext_rgb)
 
         a = np.clip(a * e, 0.0, 1.0)
         rgb_pm = rgb_pm * e
@@ -623,10 +791,10 @@ class _QuitPopup:
         out[:, :, 3] = a8
         return out
 
-    def draw(self, open_t: float, hover_t: float) -> None:
+    def draw(self, open_t: float, hover_quit_t: float, hover_key_t: float = 0.0) -> None:
         if not self._dib_bits.value or not self._hdc_screen or not self._hdc_mem or not self.hwnd:
             return
-        bgra = self.render(open_t, hover_t)
+        bgra = self.render(open_t, hover_quit_t, hover_key_t)
         self.last_rgba_bgra = bgra
         ctypes.memmove(self._dib_bits, bgra.ctypes.data, bgra.nbytes)
         ctypes.set_last_error(0)
@@ -665,6 +833,9 @@ class FloatingMicUI:
         on_cancel_record: Callable[[], None] | None = None,
         on_send_enter: Callable[[], None] | None = None,
         state_path: str | Path | None = None,
+        has_api_key: Callable[[], bool] | None = None,
+        on_save_api_key: Callable[[str], None] | None = None,
+        open_signup_url: Callable[[str], None] | None = None,
     ) -> None:
         self.on_start_record = on_start_record
         self.on_stop_record = on_stop_record
@@ -674,6 +845,9 @@ class FloatingMicUI:
         self.on_cancel_record = on_cancel_record
         self.on_send_enter = on_send_enter
         self.state_path: Path = Path(state_path) if state_path is not None else _default_state_path()
+        self.has_api_key = has_api_key
+        self.on_save_api_key = on_save_api_key
+        self.open_signup_url = open_signup_url
 
         self._ui_thread_id = threading.get_ident()
         self._closed = False
@@ -690,6 +864,9 @@ class FloatingMicUI:
         self._pill_w = TOP_BUTTON_SIZE
         self._pill_h = TOP_BUTTON_SIZE
         self._bar_vis = 0.0
+        self._dismiss_bar_mode = "recording"
+        self._dismiss_error_message = ""
+        self._dismiss_bar_w = BAR_PILL_WIDTH
         self._last_record_elapsed = 0.0
         self._border_rgb: tuple[float, float, float] = tuple(float(c) for c in BORDER_IDLE_RGB)  # type: ignore[assignment]
         self._hovered = False
@@ -701,14 +878,27 @@ class FloatingMicUI:
         self._send_flash_t = 0.0
         self._input_active = False
         self._input_active_t = 0.0
+        self._api_key_save_hovered = False
+        self._api_key_save_hover_t = 0.0
+        self._api_key_cancel_hovered = False
+        self._api_key_cancel_hover_t = 0.0
+        self._api_key_signup_hovered = False
+        self._api_key_signup_hover_t = 0.0
+        self._api_key_shake_at = 0.0
+        self._api_key_entry_focused = False
         self._audio_level = 0.0
         self._bar_levels = [0.0] * 9
         self._needs_redraw = True
 
-        # Cached 4x-supersampled timer glyph masks ("M:SS" -> (H, W) float32).
+        # Cached 4x-supersampled timer, error-toast, & signup glyph masks.
         self._timer_font = _load_timer_font(12 * _TIMER_SUPERSAMPLE)
         self._timer_y_offset = self._compute_timer_y_offset()
         self._timer_mask_cache: dict[str, np.ndarray] = {}
+        self._message_font = _load_label_font(TOAST_FONT_PX * _TIMER_SUPERSAMPLE)
+        self._message_y_offset = self._compute_message_y_offset()
+        self._message_fit_cache: dict[str, tuple[str, float]] = {}
+        self._message_mask_cache: dict[str, np.ndarray] = {}
+        self._signup_mask = self._build_signup_mask()
 
         # Drag tracking.
         self._press_active = False
@@ -761,6 +951,11 @@ class FloatingMicUI:
         self._quit_armed: dict[int, bool] = {}
         self._quit_fg_base = 0
         self._quit_popup: _QuitPopup | None = None
+        self._api_key_top: tk.Toplevel | None = None
+        self._api_key_hwnd = 0
+        self._api_key_var = tk.StringVar(master=self.root)
+        self._api_key_entry: tk.Entry | None = None
+        self._api_key_placeholder: tk.Label | None = None
 
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
@@ -776,6 +971,7 @@ class FloatingMicUI:
         self._apply_layered_style()
         self._init_layered_surface()
         self._quit_popup = _QuitPopup(self)
+        self._init_api_key_overlay()
         self._draw_current_frame(self._state_entered_at)
 
         if self.on_window_ready is not None:
@@ -808,6 +1004,318 @@ class FloatingMicUI:
         mask = (np.asarray(small, dtype=np.float32) / 255.0).copy()
         self._timer_mask_cache[label] = mask
         return mask
+
+    def _compute_message_y_offset(self) -> float:
+        """Center toast text optically using reference cap/x-height metrics."""
+        probe = Image.new("L", (1, 1), 0)
+        ref = ImageDraw.Draw(probe).textbbox((0, 0), "AEx", font=self._message_font)
+        return (ref[1] + ref[3]) * 0.5
+
+    def _measure_message_width(self, text: str) -> float:
+        if not text:
+            return 0.0
+        probe = Image.new("L", (1, 1), 0)
+        bbox = ImageDraw.Draw(probe).textbbox((0, 0), text, font=self._message_font)
+        return (bbox[2] - bbox[0]) / _TIMER_SUPERSAMPLE
+
+    def _fit_message(self, text: str) -> tuple[str, float]:
+        """Normalize whitespace, truncate with '…' to fit TOAST_MAX_TEXT_WIDTH, and cache width."""
+        cached = self._message_fit_cache.get(text)
+        if cached is not None:
+            return cached
+
+        clean = " ".join(text.split())
+        if not clean:
+            result = ("", 0.0)
+        else:
+            full_w = self._measure_message_width(clean)
+            if full_w <= TOAST_MAX_TEXT_WIDTH:
+                result = (clean, full_w)
+            else:
+                lo, hi = 0, len(clean) - 1
+                best = "…"
+                best_w = self._measure_message_width("…")
+                while lo <= hi:
+                    mid = (lo + hi) // 2
+                    prefix = clean[:mid].rstrip()
+                    candidate = f"{prefix}…" if prefix else "…"
+                    cand_w = self._measure_message_width(candidate)
+                    if cand_w <= TOAST_MAX_TEXT_WIDTH:
+                        best = candidate
+                        best_w = cand_w
+                        lo = mid + 1
+                    else:
+                        hi = mid - 1
+                result = (best, best_w)
+
+        if len(self._message_fit_cache) >= 64:
+            self._message_fit_cache.clear()
+        self._message_fit_cache[text] = result
+        return result
+
+    def _truncate_message(self, text: str) -> str:
+        """Return the single-line message truncated with '…' to fit inside the error toast."""
+        fitted, _ = self._fit_message(text)
+        return fitted
+
+    def _compute_toast_width(self, text: str) -> float:
+        _, text_w = self._fit_message(text)
+        return _clamp(
+            text_w + TOAST_HORIZONTAL_PADDING, TOAST_MIN_WIDTH, TOAST_PILL_WIDTH
+        )
+
+    def _get_message_mask(self, text: str) -> np.ndarray:
+        """Return a cached (H, W) float32 4x-LANCZOS alpha mask for a toast message."""
+        fitted, text_w = self._fit_message(text)
+        cached = self._message_mask_cache.get(fitted)
+        if cached is not None:
+            return cached
+
+        tw = max(1, int(math.ceil(text_w)) + 4)
+        th = _TIMER_MASK_H
+        w4 = tw * _TIMER_SUPERSAMPLE
+        h4 = th * _TIMER_SUPERSAMPLE
+        img = Image.new("L", (w4, h4), 0)
+        if fitted:
+            draw = ImageDraw.Draw(img)
+            bbox = draw.textbbox((0, 0), fitted, font=self._message_font)
+            bbox_w = bbox[2] - bbox[0]
+            x = (w4 - bbox_w) * 0.5 - bbox[0]
+            y = (h4 * 0.5) - self._message_y_offset
+            draw.text((x, y), fitted, fill=255, font=self._message_font)
+        small = img.resize((tw, th), Image.Resampling.LANCZOS)
+        mask = (np.asarray(small, dtype=np.float32) / 255.0).copy()
+        if len(self._message_mask_cache) >= 64:
+            self._message_mask_cache.clear()
+        self._message_mask_cache[fitted] = mask
+        return mask
+
+    def _build_signup_mask(self) -> np.ndarray:
+        """Build a 4x-LANCZOS alpha mask for the 'Sign up for a free Groq API key' link."""
+        ss = _TIMER_SUPERSAMPLE
+        font = _load_label_font(10 * ss)
+        probe = ImageDraw.Draw(Image.new("L", (1, 1), 0))
+        bbox = probe.textbbox((0, 0), API_KEY_SIGNUP_LABEL, font=font)
+        ref = probe.textbbox((0, 0), "AExy", font=font)
+        tw = max(1, int(math.ceil((bbox[2] - bbox[0]) / ss)) + 4)
+        th = 16
+        img = Image.new("L", (tw * ss, th * ss), 0)
+        ImageDraw.Draw(img).text(
+            (2 * ss - bbox[0], th * ss * 0.5 - (ref[1] + ref[3]) * 0.5),
+            API_KEY_SIGNUP_LABEL,
+            fill=255,
+            font=font,
+        )
+        small = img.resize((tw, th), Image.Resampling.LANCZOS)
+        return (np.asarray(small, dtype=np.float32) / 255.0).copy()
+
+    def _init_api_key_overlay(self) -> None:
+        """Create the lightweight borderless activatable Entry overlay for API key entry."""
+        top = tk.Toplevel(self.root)
+        top.withdraw()
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        top.configure(bg="#101218")
+
+        entry = tk.Entry(
+            top,
+            textvariable=self._api_key_var,
+            show="•",
+            bd=0,
+            highlightthickness=0,
+            relief=tk.FLAT,
+            bg="#101218",
+            fg="#E6E8F0",
+            insertbackground="#38A8FF",
+            selectbackground="#234876",
+            selectforeground="#FFFFFF",
+            font=("Segoe UI", 9),
+        )
+        entry.place(x=0, y=0, width=API_KEY_ENTRY_W, height=API_KEY_ENTRY_H)
+
+        placeholder = tk.Label(
+            top,
+            text="Paste Groq API key...",
+            anchor="w",
+            bg="#101218",
+            fg="#6E748A",
+            font=("Segoe UI", 8),
+            cursor="xterm",
+            bd=0,
+            highlightthickness=0,
+        )
+        placeholder.place(x=1, y=0, width=API_KEY_ENTRY_W - 2, height=API_KEY_ENTRY_H)
+        placeholder.bind("<Button-1>", lambda _e: self._focus_api_key_entry())
+
+        self._api_key_var.trace_add("write", lambda *_args: self._update_api_key_placeholder())
+
+        def on_return(_event: tk.Event) -> str:
+            self._submit_api_key()
+            return "break"
+
+        def on_escape(_event: tk.Event) -> str:
+            self._cancel_api_key()
+            return "break"
+
+        def on_focus_in(_event: tk.Event) -> None:
+            self._api_key_entry_focused = True
+            self._needs_redraw = True
+
+        def on_focus_out(_event: tk.Event) -> None:
+            self._api_key_entry_focused = False
+            self._needs_redraw = True
+
+        for widget in (top, entry):
+            widget.bind("<Return>", on_return)
+            widget.bind("<Escape>", on_escape)
+        entry.bind("<FocusIn>", on_focus_in)
+        entry.bind("<FocusOut>", on_focus_out)
+
+        top.geometry(f"{API_KEY_ENTRY_W}x{API_KEY_ENTRY_H}+-10000+-10000")
+        top.deiconify()
+        top.update_idletasks()
+        wid = top.winfo_id()
+        hwnd = int(self._user32.GetParent(wid) or wid)
+        ex_style = int(self._get_window_long(hwnd, GWL_EXSTYLE))
+        desired = (ex_style | WS_EX_TOOLWINDOW | WS_EX_TOPMOST) & ~WS_EX_NOACTIVATE
+        if desired != ex_style:
+            self._set_window_long(hwnd, GWL_EXSTYLE, desired)
+        top.withdraw()
+
+        self._api_key_top = top
+        self._api_key_hwnd = hwnd
+        self._api_key_entry = entry
+        self._api_key_placeholder = placeholder
+
+    def is_api_key_open(self) -> bool:
+        """Return True while the API key input overlay is active."""
+        return not self._closed and self._state == "api_key"
+
+    def _query_has_api_key(self) -> bool:
+        if self.has_api_key is None:
+            return False
+        try:
+            return bool(self.has_api_key())
+        except Exception:
+            return False
+
+    def _update_api_key_placeholder(self) -> None:
+        placeholder = self._api_key_placeholder
+        if placeholder is None:
+            return
+        try:
+            if self._api_key_var.get():
+                placeholder.place_forget()
+            else:
+                placeholder.place(x=1, y=0, width=API_KEY_ENTRY_W - 2, height=API_KEY_ENTRY_H)
+                placeholder.lift()
+        except tk.TclError:
+            pass
+
+    def _sync_api_key_overlay_geometry(self, bar_cy: float | None = None) -> None:
+        top = self._api_key_top
+        if top is None or self._closed or self._state != "api_key":
+            return
+        try:
+            dy = 0 if bar_cy is None else int(round(bar_cy - API_KEY_CENTER_Y))
+            x = int(self.root.winfo_x()) + API_KEY_ENTRY_X
+            y = int(self.root.winfo_y()) + API_KEY_ENTRY_Y + dy
+            top.geometry(f"{API_KEY_ENTRY_W}x{API_KEY_ENTRY_H}+{x}+{y}")
+        except tk.TclError:
+            pass
+
+    def _focus_api_key_entry(self) -> None:
+        top = self._api_key_top
+        entry = self._api_key_entry
+        if top is None or entry is None or self._closed:
+            return
+        try:
+            top.focus_force()
+        except tk.TclError:
+            pass
+        try:
+            entry.focus_set()
+        except tk.TclError:
+            pass
+
+    def _show_api_key_overlay(self) -> None:
+        top = self._api_key_top
+        if top is None or self._closed:
+            return
+        if self._api_key_placeholder is not None:
+            hint = "Paste new Groq key..." if self._query_has_api_key() else "Paste Groq API key..."
+            try:
+                self._api_key_placeholder.configure(text=hint)
+            except tk.TclError:
+                pass
+        self._api_key_var.set("")
+        self._update_api_key_placeholder()
+        self._api_key_shake_at = 0.0
+        bar_cy = _lerp(TOP_CENTER_Y + 28.0, API_KEY_CENTER_Y, self._bar_vis)
+        self._sync_api_key_overlay_geometry(bar_cy)
+        try:
+            top.deiconify()
+            top.attributes("-topmost", True)
+            top.lift()
+            if self._api_key_hwnd:
+                ex_style = int(self._get_window_long(self._api_key_hwnd, GWL_EXSTYLE))
+                desired = (ex_style | WS_EX_TOOLWINDOW | WS_EX_TOPMOST) & ~WS_EX_NOACTIVATE
+                if desired != ex_style:
+                    self._set_window_long(self._api_key_hwnd, GWL_EXSTYLE, desired)
+        except tk.TclError:
+            pass
+        self._focus_api_key_entry()
+
+    def _hide_api_key_overlay(self) -> None:
+        self._api_key_entry_focused = False
+        try:
+            self._api_key_var.set("")
+        except tk.TclError:
+            pass
+        self._update_api_key_placeholder()
+        top = self._api_key_top
+        if top is not None:
+            try:
+                top.withdraw()
+            except tk.TclError:
+                pass
+
+    def _open_signup_page(self) -> None:
+        try:
+            if self.open_signup_url is not None:
+                self.open_signup_url(GROQ_SIGNUP_URL)
+            else:
+                webbrowser.open(GROQ_SIGNUP_URL, new=2)
+        except Exception:
+            pass
+        self._focus_api_key_entry()
+
+    def _submit_api_key(self) -> None:
+        if self._closed or self._state != "api_key":
+            return
+        raw = self._api_key_var.get()
+        cleaned = raw.strip().strip('"').strip("'").strip()
+        if not cleaned or "\r" in raw or "\n" in raw:
+            self._api_key_shake_at = time.perf_counter()
+            self._needs_redraw = True
+            self._focus_api_key_entry()
+            return
+        self._api_key_var.set("")
+        if self.on_save_api_key is None:
+            self._apply_state("success", "")
+            return
+        try:
+            self.on_save_api_key(raw)
+        except Exception:
+            self._apply_state("error", "Could not save key")
+            return
+        if self._state == "api_key":
+            self._apply_state("success", "")
+
+    def _cancel_api_key(self) -> None:
+        if self._closed or self._state != "api_key":
+            return
+        self._apply_state("idle", "")
 
     def _configure_win32_api(self) -> None:
         """Define explicit 64-bit/32-bit ctypes prototypes for user32 and gdi32."""
@@ -1002,18 +1510,49 @@ class FloatingMicUI:
             self._auto_reset_after_id = None
 
         now = time.perf_counter()
-        if self._state == "recording" and state != "recording":
+        prev_state = self._state
+        prev_message = self._message
+        if prev_state == "recording" and state != "recording":
             self._last_record_elapsed = max(0.0, now - self._state_entered_at)
-        elif state == "recording":
+            if self._bar_vis > 0.01:
+                self._dismiss_bar_mode = "recording"
+        elif prev_state == "error" and state != "error":
+            if prev_message.strip() and self._bar_vis > 0.01:
+                self._dismiss_bar_mode = "error"
+                self._dismiss_error_message = prev_message
+                self._dismiss_bar_w = self._compute_toast_width(prev_message)
+        elif prev_state == "api_key" and state != "api_key":
+            if self._bar_vis > 0.01:
+                self._dismiss_bar_mode = "api_key"
+            self._hide_api_key_overlay()
+
+        if state == "recording":
             self._last_record_elapsed = 0.0
+            self._dismiss_bar_mode = "recording"
+            self._dismiss_error_message = ""
+        elif state == "error":
+            if message.strip():
+                self._dismiss_bar_mode = "error"
+                self._dismiss_error_message = message
+                self._dismiss_bar_w = self._compute_toast_width(message)
+            else:
+                self._dismiss_error_message = ""
+        elif state == "api_key":
+            self._dismiss_bar_mode = "api_key"
+            self._dismiss_error_message = ""
 
         self._state = state
         self._message = message
         self._state_entered_at = now
         self._cancel_hovered = False
+        self._api_key_save_hovered = False
+        self._api_key_cancel_hovered = False
+        self._api_key_signup_hovered = False
         self._needs_redraw = True
 
-        if state == "success":
+        if state == "api_key":
+            self._show_api_key_overlay()
+        elif state == "success":
             self._auto_reset_after_id = self.root.after(
                 SUCCESS_DURATION_MS,
                 lambda g=gen: self._auto_reset_to_idle(g),
@@ -1068,6 +1607,15 @@ class FloatingMicUI:
         self._quit_popup = None
         if popup is not None:
             popup.destroy()
+        self._hide_api_key_overlay()
+        api_top = self._api_key_top
+        self._api_key_top = None
+        self._api_key_hwnd = 0
+        if api_top is not None:
+            try:
+                api_top.destroy()
+            except tk.TclError:
+                pass
         self._cleanup_gdi()
         try:
             self.root.quit()
@@ -1084,6 +1632,7 @@ class FloatingMicUI:
             self._quit_open = False
             if self._quit_popup is not None:
                 self._quit_popup.cleanup_gdi()
+            self._api_key_hwnd = 0
             self._cleanup_gdi()
 
     def _cancel_button_center_x(self) -> float:
@@ -1094,8 +1643,31 @@ class FloatingMicUI:
             return False
         return math.hypot(x - self._cancel_button_center_x(), y - BAR_CENTER_Y) <= 15.0
 
+    def _is_top_circle_hit(self, x: float, y: float) -> bool:
+        return math.hypot(x - TOP_CENTER_X, y - TOP_CENTER_Y) <= (TOP_BUTTON_SIZE * 0.5 + 2.0)
+
+    def _is_api_key_save_hit(self, x: float, y: float) -> bool:
+        if self._state != "api_key":
+            return False
+        return math.hypot(x - API_KEY_SAVE_CX, y - API_KEY_INPUT_ROW_CY) <= 12.5
+
+    def _is_api_key_cancel_hit(self, x: float, y: float) -> bool:
+        if self._state != "api_key":
+            return False
+        return math.hypot(x - API_KEY_CANCEL_CX, y - API_KEY_INPUT_ROW_CY) <= 12.5
+
+    def _is_api_key_signup_hit(self, x: float, y: float) -> bool:
+        if self._state != "api_key":
+            return False
+        return (
+            abs(x - BAR_CENTER_X) <= API_KEY_SIGNUP_HW
+            and abs(y - API_KEY_SIGNUP_CY) <= (API_KEY_SIGNUP_HH + 2.0)
+        )
+
     def _is_send_enter_hit(self, x: float, y: float) -> bool:
         """Hit-test the visible Send/Enter tab to the right of the circular mic/stop button."""
+        if self._state == "api_key":
+            return False
         if not (140.0 <= x <= (SEND_TAB_RIGHT + 3.0) and 23.0 <= y <= 77.0):
             return False
         radius = TOP_BUTTON_SIZE * 0.5
@@ -1123,6 +1695,7 @@ class FloatingMicUI:
             new_x = self._win_start_x + dx
             new_y = self._win_start_y + dy
             self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}+{new_x}+{new_y}")
+            self._sync_api_key_overlay_geometry()
 
     def _on_release(self, event: tk.Event) -> None:
         if not self._press_active:
@@ -1145,6 +1718,19 @@ class FloatingMicUI:
                 self.on_send_enter()
             return
 
+        if self._state == "api_key":
+            if self._is_api_key_save_hit(event.x, event.y):
+                self._submit_api_key()
+            elif self._is_api_key_cancel_hit(event.x, event.y):
+                self._cancel_api_key()
+            elif self._is_api_key_signup_hit(event.x, event.y):
+                self._open_signup_page()
+            elif self._is_top_circle_hit(event.x, event.y):
+                self._cancel_api_key()
+            else:
+                self._focus_api_key_entry()
+            return
+
         if self._state == "idle":
             self._apply_state("recording")
             self.on_start_record()
@@ -1156,6 +1742,8 @@ class FloatingMicUI:
             else:
                 self._apply_state("transcribing")
                 self.on_stop_record()
+        elif self._state == "error":
+            self._apply_state("idle", "")
 
     def _on_right_click(self, event: tk.Event) -> None:
         self._show_quit_popup(int(event.x_root), int(event.y_root))
@@ -1211,7 +1799,7 @@ class FloatingMicUI:
             self._quit_armed[vk] = not (self._async_key_state(vk) & 0x8000)
         self._async_key_state(VK_ESCAPE)
         self._quit_fg_base = self._foreground_hwnd()
-        popup.show(x, y)
+        popup.show(x, y, has_key=self._query_has_api_key())
         self._quit_open = True
 
     def _hide_quit_popup(self) -> None:
@@ -1222,12 +1810,35 @@ class FloatingMicUI:
         if popup is not None:
             popup.hide()
 
+    def _is_point_in_rect(
+        self, screen_x: float, screen_y: float, rect: tuple[float, float, float, float]
+    ) -> bool:
+        left, top, right, bottom = rect
+        return left <= screen_x <= right and top <= screen_y <= bottom
+
     def _is_point_in_quit_pill(self, screen_x: float, screen_y: float) -> bool:
         popup = self._quit_popup
-        if popup is None:
-            return False
-        left, top, right, bottom = popup.pill_rect_screen()
-        return left <= screen_x <= right and top <= screen_y <= bottom
+        return popup is not None and self._is_point_in_rect(
+            screen_x, screen_y, popup.pill_rect_screen()
+        )
+
+    def _is_point_in_quit_item(self, screen_x: float, screen_y: float) -> bool:
+        popup = self._quit_popup
+        return popup is not None and self._is_point_in_rect(
+            screen_x, screen_y, popup.quit_item_rect_screen()
+        )
+
+    def _is_point_in_api_key_item(self, screen_x: float, screen_y: float) -> bool:
+        popup = self._quit_popup
+        return popup is not None and self._is_point_in_rect(
+            screen_x, screen_y, popup.api_key_item_rect_screen()
+        )
+
+    def _handle_open_api_key(self) -> None:
+        self._hide_quit_popup()
+        if self._state in ("recording", "transcribing"):
+            return
+        self._apply_state("api_key", "")
 
     def _on_quit_release(self, event: tk.Event) -> None:
         if not self._quit_open or self._quit_popup is None:
@@ -1237,11 +1848,14 @@ class FloatingMicUI:
         if sx is None or sy is None:
             sx = self._quit_popup.pos_x + float(getattr(event, "x", -1))
             sy = self._quit_popup.pos_y + float(getattr(event, "y", -1))
-        if self._is_point_in_quit_pill(float(sx), float(sy)):
+        fx, fy = float(sx), float(sy)
+        if self._is_point_in_quit_item(fx, fy):
             self._handle_quit()
+        elif self._is_point_in_api_key_item(fx, fy):
+            self._handle_open_api_key()
 
     def _poll_quit_dismiss(self) -> bool:
-        """Dismiss the Quit popup on outside click, Escape, or foreground change."""
+        """Dismiss the right-click menu on outside click, Escape, or foreground change."""
         if not self._quit_open:
             return False
         cur_x, cur_y = self._cursor_pos()
@@ -1264,7 +1878,7 @@ class FloatingMicUI:
                 self._quit_fg_base = fg
         elif fg and fg != self._quit_fg_base:
             popup_hwnd = self._quit_popup.hwnd if self._quit_popup is not None else 0
-            if fg not in (popup_hwnd, self.hwnd):
+            if fg not in (popup_hwnd, self.hwnd, self._api_key_hwnd):
                 self._hide_quit_popup()
                 return True
         return False
@@ -1275,22 +1889,35 @@ class FloatingMicUI:
         if self._poll_quit_dismiss():
             return
         cur_x, cur_y = self._cursor_pos()
-        self._quit_popup.tick(now, dt, self._is_point_in_quit_pill(cur_x, cur_y))
+        self._quit_popup.tick(
+            now,
+            dt,
+            hover_quit=self._is_point_in_quit_item(cur_x, cur_y),
+            hover_key=self._is_point_in_api_key_item(cur_x, cur_y),
+        )
 
     def _on_motion(self, event: tk.Event) -> None:
         cancel_hovered = self._is_cancel_hit(event.x, event.y)
         send_hovered = self._is_send_enter_hit(event.x, event.y)
-        circle_hovered = not send_hovered and not cancel_hovered
+        api_save_hovered = self._is_api_key_save_hit(event.x, event.y)
+        api_cancel_hovered = self._is_api_key_cancel_hit(event.x, event.y)
+        api_signup_hovered = self._is_api_key_signup_hit(event.x, event.y)
+        if self._state == "api_key":
+            circle_hovered = self._is_top_circle_hit(event.x, event.y)
+        else:
+            circle_hovered = not send_hovered and not cancel_hovered
         changed = False
-        if cancel_hovered != self._cancel_hovered:
-            self._cancel_hovered = cancel_hovered
-            changed = True
-        if send_hovered != self._send_hovered:
-            self._send_hovered = send_hovered
-            changed = True
-        if circle_hovered != self._hovered:
-            self._hovered = circle_hovered
-            changed = True
+        for attr, val in (
+            ("_cancel_hovered", cancel_hovered),
+            ("_send_hovered", send_hovered),
+            ("_api_key_save_hovered", api_save_hovered),
+            ("_api_key_cancel_hovered", api_cancel_hovered),
+            ("_api_key_signup_hovered", api_signup_hovered),
+            ("_hovered", circle_hovered),
+        ):
+            if getattr(self, attr) != val:
+                setattr(self, attr, val)
+                changed = True
         if changed:
             self._needs_redraw = True
 
@@ -1303,13 +1930,16 @@ class FloatingMicUI:
             and self._is_send_enter_hit(float(x), float(y))
         )
         self._send_hovered = send_hovered
-        self._hovered = not send_hovered
+        self._hovered = not send_hovered and self._state != "api_key"
         self._needs_redraw = True
 
     def _on_leave(self, _event: tk.Event) -> None:
         self._hovered = False
         self._cancel_hovered = False
         self._send_hovered = False
+        self._api_key_save_hovered = False
+        self._api_key_cancel_hovered = False
+        self._api_key_signup_hovered = False
         self._needs_redraw = True
 
     def _default_window_position(self) -> tuple[int, int]:
@@ -1403,6 +2033,37 @@ class FloatingMicUI:
             return TOP_BUTTON_SIZE + pulse, TOP_BUTTON_SIZE + pulse
         return TOP_BUTTON_SIZE, TOP_BUTTON_SIZE
 
+    def _error_pulse(self, now: float) -> float:
+        """Smooth 1.1 Hz red-to-amber pulse synchronized across ring and toast pill."""
+        elapsed = max(0.0, now - self._state_entered_at)
+        return 0.5 - 0.5 * math.cos(elapsed * 7.0)
+
+    def _has_active_bar(self) -> bool:
+        return self._state in ("recording", "api_key") or (
+            self._state == "error" and bool(self._message.strip())
+        )
+
+    def _resolve_bottom_bar_spec(self) -> tuple[str, float, float, float, str]:
+        """Return (mode, width, height, target_cy, message) for the bottom pill."""
+        if self._state == "recording":
+            return ("recording", BAR_PILL_WIDTH, BAR_PILL_HEIGHT, BAR_CENTER_Y, "")
+        if self._state == "api_key" or (
+            self._dismiss_bar_mode == "api_key" and not self._has_active_bar()
+        ):
+            return ("api_key", API_KEY_PILL_WIDTH, API_KEY_PILL_HEIGHT, API_KEY_CENTER_Y, "")
+        if self._state == "error" and self._message.strip():
+            toast_w = self._compute_toast_width(self._message)
+            return ("error", toast_w, TOAST_PILL_HEIGHT, TOAST_CENTER_Y, self._message)
+        if self._dismiss_bar_mode == "error" and self._dismiss_error_message.strip():
+            return (
+                "error",
+                self._dismiss_bar_w,
+                TOAST_PILL_HEIGHT,
+                TOAST_CENTER_Y,
+                self._dismiss_error_message,
+            )
+        return ("recording", BAR_PILL_WIDTH, BAR_PILL_HEIGHT, BAR_CENTER_Y, "")
+
     def _target_border_rgb(self, now: float) -> tuple[int, int, int]:
         if self._state == "idle":
             base_idle = _lerp_rgb(BORDER_IDLE_RGB, BORDER_HOVER_RGB, self._hover_t)
@@ -1417,10 +2078,22 @@ class FloatingMicUI:
         if self._state == "transcribing":
             wave = 0.5 + 0.5 * math.sin(now * 4.5)
             return _lerp_rgb(ACCENT_TRANSCRIBING_A_RGB, ACCENT_TRANSCRIBING_B_RGB, wave)
+        if self._state == "api_key":
+            wave = 0.5 + 0.5 * math.sin(now * 3.2)
+            return _lerp_rgb(ACCENT_API_KEY_A_RGB, ACCENT_API_KEY_B_RGB, wave * 0.45)
         if self._state == "success":
             return ACCENT_SUCCESS_RGB
-        flash = 0.5 + 0.5 * math.sin((now - self._state_entered_at) * 16.0)
-        return _lerp_rgb(ACCENT_ERROR_RED_RGB, ACCENT_ERROR_AMBER_RGB, flash)
+        return _lerp_rgb(
+            ACCENT_ERROR_RED_RGB, ACCENT_ERROR_AMBER_RGB, self._error_pulse(now)
+        )
+
+    def _api_key_shake_offset(self, now: float) -> float:
+        if self._state != "api_key" or self._api_key_shake_at <= 0.0:
+            return 0.0
+        elapsed = now - self._api_key_shake_at
+        if elapsed < 0.0 or elapsed >= 0.35:
+            return 0.0
+        return 2.5 * math.sin(elapsed * 45.0) * math.exp(-elapsed * 8.0)
 
     def _step_animation(self, now: float, dt: float) -> bool:
         changed = self._needs_redraw
@@ -1455,7 +2128,7 @@ class FloatingMicUI:
             self._input_active_t = target_input_active
             changed = True
 
-        target_bar_vis = 1.0 if self._state == "recording" else 0.0
+        target_bar_vis = 1.0 if self._has_active_bar() else 0.0
         if abs(target_bar_vis - self._bar_vis) > 0.005:
             alpha_bar = 1.0 - math.exp(-18.0 * dt)
             self._bar_vis = _lerp(self._bar_vis, target_bar_vis, alpha_bar)
@@ -1463,17 +2136,27 @@ class FloatingMicUI:
         elif self._bar_vis != target_bar_vis:
             self._bar_vis = target_bar_vis
             changed = True
+        if self._bar_vis == 0.0 and not self._has_active_bar():
+            self._dismiss_bar_mode = "recording"
+            self._dismiss_error_message = ""
+        elif self._state == "api_key":
+            bar_cy = _lerp(TOP_CENTER_Y + 28.0, API_KEY_CENTER_Y, self._bar_vis)
+            self._sync_api_key_overlay_geometry(bar_cy)
 
-        target_cancel_h = (
-            1.0 if (self._cancel_hovered and self._state == "recording") else 0.0
-        )
-        if abs(target_cancel_h - self._cancel_hover_t) > 0.005:
-            alpha_ch = 1.0 - math.exp(-22.0 * dt)
-            self._cancel_hover_t = _lerp(self._cancel_hover_t, target_cancel_h, alpha_ch)
-            changed = True
-        elif self._cancel_hover_t != target_cancel_h:
-            self._cancel_hover_t = target_cancel_h
-            changed = True
+        for cur_attr, t_attr, hovered_flag, rate in (
+            ("_cancel_hover_t", None, self._cancel_hovered and self._state == "recording", 22.0),
+            ("_api_key_save_hover_t", None, self._api_key_save_hovered and self._state == "api_key", 22.0),
+            ("_api_key_cancel_hover_t", None, self._api_key_cancel_hovered and self._state == "api_key", 22.0),
+            ("_api_key_signup_hover_t", None, self._api_key_signup_hovered and self._state == "api_key", 18.0),
+        ):
+            target = 1.0 if hovered_flag else 0.0
+            cur_val = getattr(self, cur_attr)
+            if abs(target - cur_val) > 0.005:
+                setattr(self, cur_attr, _lerp(cur_val, target, 1.0 - math.exp(-rate * dt)))
+                changed = True
+            elif cur_val != target:
+                setattr(self, cur_attr, target)
+                changed = True
 
         target_send_h = 1.0 if self._send_hovered else 0.0
         if abs(target_send_h - self._send_hover_t) > 0.005:
@@ -1553,7 +2236,7 @@ class FloatingMicUI:
                 for i in range(9):
                     self._bar_levels[i] = 0.0
 
-        if self._state in ("recording", "transcribing", "success", "error"):
+        if self._state in ("recording", "transcribing", "success", "error", "api_key"):
             changed = True
         elif self._state == "idle" and (
             self._input_active or self._input_active_t > 0.005
@@ -1719,26 +2402,57 @@ class FloatingMicUI:
             if elapsed < 0.35:
                 shake_x = 2.5 * math.sin(elapsed * 45.0) * math.exp(-elapsed * 8.0)
 
+        border_rgb_u8 = (
+            int(round(self._border_rgb[0])),
+            int(round(self._border_rgb[1])),
+            int(round(self._border_rgb[2])),
+        )
+        border_col = _rgb_norm(border_rgb_u8)
+
         out_rgb_pm = np.zeros((WINDOW_HEIGHT, WINDOW_WIDTH, 3), dtype=np.float32)
         out_a = np.zeros((WINDOW_HEIGHT, WINDOW_WIDTH), dtype=np.float32)
         ux0, uy0, ux1, uy1 = WINDOW_WIDTH, WINDOW_HEIGHT, 0, 0
 
-        # 1. Render unfolding 1x bottom bar first so it slides cleanly from behind the top button.
+        # 1. Render unfolding 1x bottom bar / error toast / API key container first.
         if self._bar_vis > 0.01:
-            bar_cy = _lerp(TOP_CENTER_Y + 28.0, BAR_CENTER_Y, self._bar_vis)
-            bar_pulse = 0.5 + 0.5 * math.sin(now * 6.0)
-            bar_border_rgb = _lerp_rgb(
-                ACCENT_RECORDING_RGB, (255, 118, 130), bar_pulse * 0.25
+            bar_mode, bar_w, bar_h, bar_target_cy, bar_message = (
+                self._resolve_bottom_bar_spec()
             )
-            bar_glow = 0.20 + 0.06 * bar_pulse
-            bar_inward = 0.16 + 0.06 * bar_pulse
+            bar_cy = _lerp(TOP_CENTER_Y + 28.0, bar_target_cy, self._bar_vis)
+            bar_radius: float | None = None
+            if bar_mode == "error":
+                bar_cx = BAR_CENTER_X + shake_x
+                bar_border_rgb = border_rgb_u8
+                err_pulse = self._error_pulse(now) if self._state == "error" else 0.0
+                bar_glow = (0.20 + 0.06 * err_pulse) if self._state == "error" else 0.16
+                bar_inward = (0.16 + 0.05 * err_pulse) if self._state == "error" else 0.12
+            elif bar_mode == "api_key":
+                api_shake = self._api_key_shake_offset(now)
+                bar_cx = BAR_CENTER_X + api_shake
+                bar_radius = API_KEY_PILL_RADIUS
+                if abs(api_shake) > 0.001 or (
+                    self._api_key_shake_at > 0.0 and (now - self._api_key_shake_at) < 0.35
+                ):
+                    bar_border_rgb = ACCENT_ERROR_RED_RGB
+                else:
+                    bar_border_rgb = _lerp_rgb(ACCENT_API_KEY_A_RGB, BORDER_HOVER_RGB, 0.25)
+                bar_glow = 0.20
+                bar_inward = 0.14
+            else:
+                bar_cx = BAR_CENTER_X
+                bar_pulse = 0.5 + 0.5 * math.sin(now * 6.0)
+                bar_border_rgb = _lerp_rgb(
+                    ACCENT_RECORDING_RGB, (255, 118, 130), bar_pulse * 0.25
+                )
+                bar_glow = 0.20 + 0.06 * bar_pulse
+                bar_inward = 0.16 + 0.06 * bar_pulse
             box = self._compose_pill_into(
                 out_rgb_pm,
                 out_a,
-                BAR_CENTER_X,
+                bar_cx,
                 bar_cy,
-                BAR_PILL_WIDTH * 0.5,
-                BAR_PILL_HEIGHT * 0.5,
+                bar_w * 0.5,
+                bar_h * 0.5,
                 BG_PILL_RGB,
                 bar_border_rgb,
                 bar_glow,
@@ -1748,8 +2462,19 @@ class FloatingMicUI:
                 1.3,
                 self._bar_vis,
                 lambda surf, px, py, ox, oy: self._draw_bottom_bar_sdf(
-                    surf, px, py, BAR_CENTER_X, bar_cy, now, ox, oy
+                    surf,
+                    px,
+                    py,
+                    bar_cx,
+                    bar_cy,
+                    bar_w,
+                    bar_mode,
+                    bar_message,
+                    now,
+                    ox,
+                    oy,
                 ),
+                radius=bar_radius,
             )
             if box is not None:
                 ux0, uy0 = min(ux0, box[0]), min(uy0, box[1])
@@ -1797,17 +2522,11 @@ class FloatingMicUI:
             ux0, uy0 = min(ux0, send_box[0]), min(uy0, send_box[1])
             ux1, uy1 = max(ux1, send_box[2]), max(uy1, send_box[3])
 
-        # 3. Render top circular 74x74 pill cleanly ON TOP (idle, recording, transcribing, success, error).
+        # 3. Render top circular 74x74 pill cleanly ON TOP (idle, recording, transcribing, success, error, api_key).
         cx = TOP_CENTER_X + shake_x
         cy = TOP_CENTER_Y
         half_w = self._pill_w * 0.5
         half_h = self._pill_h * 0.5
-        border_rgb_u8 = (
-            int(round(self._border_rgb[0])),
-            int(round(self._border_rgb[1])),
-            int(round(self._border_rgb[2])),
-        )
-        border_col = _rgb_norm(border_rgb_u8)
         fill_rgb_u8 = BG_PILL_RGB
         if self._state == "idle" and self._hover_t > 0.0:
             fill_rgb_u8 = _lerp_rgb(BG_PILL_RGB, BG_PILL_HOVER_RGB, self._hover_t)
@@ -1842,7 +2561,11 @@ class FloatingMicUI:
             glow_strength = 0.20 * (1.0 - 0.5 * _clamp(elapsed_ok / 0.45, 0.0, 1.0))
             inner_glow_strength = 0.15
         elif self._state == "error":
-            glow_strength = 0.18
+            err_pulse = self._error_pulse(now)
+            glow_strength = 0.20 + 0.06 * err_pulse
+            inner_glow_strength = 0.16 + 0.05 * err_pulse
+        elif self._state == "api_key":
+            glow_strength = 0.20
             inner_glow_strength = 0.15
 
         def draw_top_content(
@@ -1881,6 +2604,12 @@ class FloatingMicUI:
                 if err_vis > 0.02:
                     self._draw_error_sdf(
                         surf_rgb, px, py, cx, cy, border_col, err_vis, ox, oy
+                    )
+            elif self._state == "api_key":
+                key_vis = _clamp(1.0 - (self._pill_w - 82.0) / 36.0, 0.0, 1.0)
+                if key_vis > 0.02:
+                    self._draw_key_top_sdf(
+                        surf_rgb, px, py, cx, cy, key_vis, ox, oy
                     )
 
         top_box = self._compose_pill_into(
@@ -2012,7 +2741,76 @@ class FloatingMicUI:
         sq_cov = (_sdf_cov(d_sq) * visibility).astype(np.float32)
         _blend_surface(sub, sq_cov, (1.0, 1.0, 1.0))
 
-    def _draw_bottom_bar_sdf(
+    def _draw_circle_cross_sdf(
+        self,
+        surf_rgb: np.ndarray,
+        px: np.ndarray,
+        py: np.ndarray,
+        btn_cx: float,
+        btn_cy: float,
+        hover_t: float,
+        ox: int,
+        oy: int,
+    ) -> None:
+        roi_h, roi_w = surf_rgb.shape[:2]
+        cancel_roi = self._local_roi(
+            px, py, btn_cx, btn_cy, 11.5, 11.5, ox, oy, roi_w, roi_h
+        )
+        if cancel_roi is None:
+            return
+        ys, xs, rpx, rpy = cancel_roi
+        sub = surf_rgb[ys, xs]
+        d_bg = _sdf_circle(rpx, rpy, btn_cx, btn_cy, 10.5)
+        bg_alpha = _lerp(0.09, 0.24, hover_t)
+        bg_col = _rgb_norm(_lerp_rgb(WHITE_RGB, ACCENT_RECORDING_RGB, hover_t * 0.65))
+        _blend_surface(sub, (_sdf_cov(d_bg) * bg_alpha).astype(np.float32), bg_col)
+
+        cross_half = 3.6
+        d_x1 = _sdf_segment(
+            rpx,
+            rpy,
+            btn_cx - cross_half,
+            btn_cy - cross_half,
+            btn_cx + cross_half,
+            btn_cy + cross_half,
+            0.95,
+        )
+        d_x2 = _sdf_segment(
+            rpx,
+            rpy,
+            btn_cx - cross_half,
+            btn_cy + cross_half,
+            btn_cx + cross_half,
+            btn_cy - cross_half,
+            0.95,
+        )
+        cross_cov = _sdf_cov(np.minimum(d_x1, d_x2))
+        cross_col = _rgb_norm(_lerp_rgb(CANCEL_ICON_RGB, WHITE_RGB, hover_t))
+        _blend_surface(sub, cross_cov, cross_col)
+
+    def _draw_key_top_sdf(
+        self,
+        surf_rgb: np.ndarray,
+        px: np.ndarray,
+        py: np.ndarray,
+        cx: float,
+        cy: float,
+        visibility: float,
+        ox: int,
+        oy: int,
+    ) -> None:
+        roi = self._local_roi(
+            px, py, cx, cy, 20.0, 15.0, ox, oy, surf_rgb.shape[1], surf_rgb.shape[0]
+        )
+        if roi is None:
+            return
+        ys, xs, rpx, rpy = roi
+        sub = surf_rgb[ys, xs]
+        d_key = _sdf_key_glyph(rpx, rpy, cx, cy, scale=2.2)
+        key_col = _rgb_norm(_lerp_rgb(WHITE_RGB, ACCENT_API_KEY_B_RGB, 0.25))
+        _blend_surface(sub, (_sdf_cov(d_key) * visibility).astype(np.float32), key_col)
+
+    def _draw_api_key_bar(
         self,
         surf_rgb: np.ndarray,
         px: np.ndarray,
@@ -2024,8 +2822,132 @@ class FloatingMicUI:
         oy: int,
     ) -> None:
         roi_h, roi_w = surf_rgb.shape[:2]
-        bar_left = bar_cx - BAR_PILL_WIDTH * 0.5
-        bar_right = bar_cx + BAR_PILL_WIDTH * 0.5
+        row_cy = bar_cy + (API_KEY_INPUT_ROW_CY - API_KEY_CENTER_Y)
+        well_cx = bar_cx - 27.0
+        well_hw, well_hh, well_rad = 61.0, 10.0, 7.0
+
+        # 1. Recessed SDF input well matching the overlay Entry (#101218).
+        well_roi = self._local_roi(
+            px, py, well_cx, row_cy, well_hw + 1.5, well_hh + 1.5, ox, oy, roi_w, roi_h
+        )
+        if well_roi is not None:
+            ys, xs, rpx, rpy = well_roi
+            sub = surf_rgb[ys, xs]
+            d_well = _sdf_rounded_box(rpx, rpy, well_cx, row_cy, well_hw, well_hh, well_rad)
+            _blend_surface(sub, _sdf_cov(d_well), _rgb_norm(API_KEY_WELL_FILL_RGB))
+            shake_active = (
+                self._api_key_shake_at > 0.0 and (now - self._api_key_shake_at) < 0.35
+            )
+            if shake_active:
+                well_border = ACCENT_ERROR_RED_RGB
+            elif self._api_key_entry_focused:
+                well_border = ACCENT_API_KEY_A_RGB
+            else:
+                well_border = QUIT_BORDER_RGB
+            ring_cov = _sdf_cov(np.abs(d_well + 0.5) - 0.5)
+            _blend_surface(sub, ring_cov, _rgb_norm(well_border))
+
+        # 2. Save (✓) circular button.
+        save_cx = bar_cx + (API_KEY_SAVE_CX - BAR_CENTER_X)
+        save_roi = self._local_roi(
+            px, py, save_cx, row_cy, 11.5, 11.5, ox, oy, roi_w, roi_h
+        )
+        if save_roi is not None:
+            ys, xs, rpx, rpy = save_roi
+            sub = surf_rgb[ys, xs]
+            d_save_bg = _sdf_circle(rpx, rpy, save_cx, row_cy, API_KEY_BTN_R)
+            bg_alpha = _lerp(0.11, 0.28, self._api_key_save_hover_t)
+            bg_col = _rgb_norm(
+                _lerp_rgb(WHITE_RGB, ACCENT_SUCCESS_RGB, 0.35 + 0.65 * self._api_key_save_hover_t)
+            )
+            _blend_surface(sub, (_sdf_cov(d_save_bg) * bg_alpha).astype(np.float32), bg_col)
+
+            d_s1 = _sdf_segment(
+                rpx, rpy, save_cx - 3.9, row_cy + 0.3, save_cx - 1.1, row_cy + 3.0, 1.05
+            )
+            d_s2 = _sdf_segment(
+                rpx, rpy, save_cx - 1.1, row_cy + 3.0, save_cx + 4.0, row_cy - 2.8, 1.05
+            )
+            chk_cov = _sdf_cov(np.minimum(d_s1, d_s2))
+            chk_col = _rgb_norm(
+                _lerp_rgb(TIMER_TEXT_RGB, ACCENT_SUCCESS_RGB, self._api_key_save_hover_t)
+            )
+            _blend_surface(sub, chk_cov, chk_col)
+
+        # 3. Cancel (✕) circular button.
+        cancel_cx = bar_cx + (API_KEY_CANCEL_CX - BAR_CENTER_X)
+        self._draw_circle_cross_sdf(
+            surf_rgb, px, py, cancel_cx, row_cy, self._api_key_cancel_hover_t, ox, oy
+        )
+
+        # 4. "Sign up for a free Groq API key" button pill + mask.
+        signup_cy = bar_cy + (API_KEY_SIGNUP_CY - API_KEY_CENTER_Y)
+        signup_roi = self._local_roi(
+            px, py, bar_cx, signup_cy, API_KEY_SIGNUP_HW + 1.0, API_KEY_SIGNUP_HH + 1.0,
+            ox, oy, roi_w, roi_h,
+        )
+        if signup_roi is not None:
+            ys, xs, rpx, rpy = signup_roi
+            sub = surf_rgb[ys, xs]
+            d_sig = _sdf_rounded_box(
+                rpx, rpy, bar_cx, signup_cy, API_KEY_SIGNUP_HW, API_KEY_SIGNUP_HH, 6.0
+            )
+            sig_alpha = _lerp(0.04, 0.20, self._api_key_signup_hover_t)
+            _blend_surface(
+                sub,
+                (_sdf_cov(d_sig) * sig_alpha).astype(np.float32),
+                _rgb_norm(ACCENT_API_KEY_A_RGB),
+            )
+        link_rgb = _rgb_norm(
+            _lerp_rgb(API_KEY_SIGNUP_RGB, API_KEY_SIGNUP_HOVER_RGB, self._api_key_signup_hover_t)
+        )
+        self._blit_mask(surf_rgb, self._signup_mask, bar_cx, signup_cy, link_rgb, 1.0, ox, oy)
+
+    def _draw_error_toast(
+        self,
+        surf_rgb: np.ndarray,
+        bar_cx: float,
+        bar_cy: float,
+        message: str,
+        ox: int,
+        oy: int,
+    ) -> None:
+        mask = self._get_message_mask(message)
+        self._blit_mask(
+            surf_rgb,
+            mask,
+            bar_cx,
+            bar_cy,
+            _rgb_norm(TIMER_TEXT_RGB),
+            1.0,
+            ox,
+            oy,
+        )
+
+    def _draw_bottom_bar_sdf(
+        self,
+        surf_rgb: np.ndarray,
+        px: np.ndarray,
+        py: np.ndarray,
+        bar_cx: float,
+        bar_cy: float,
+        bar_w: float,
+        bar_mode: str,
+        message: str,
+        now: float,
+        ox: int,
+        oy: int,
+    ) -> None:
+        if bar_mode == "error":
+            self._draw_error_toast(surf_rgb, bar_cx, bar_cy, message, ox, oy)
+            return
+        if bar_mode == "api_key":
+            self._draw_api_key_bar(surf_rgb, px, py, bar_cx, bar_cy, now, ox, oy)
+            return
+
+        roi_h, roi_w = surf_rgb.shape[:2]
+        bar_left = bar_cx - bar_w * 0.5
+        bar_right = bar_cx + bar_w * 0.5
 
         # Left: 9-bar audio-reactive waveform at 1x original size.
         bars_left = bar_left + 16.0
@@ -2049,45 +2971,9 @@ class FloatingMicUI:
 
         # Right: circular X cancel button inside its tight ROI.
         cancel_cx = bar_right - 21.0
-        cancel_roi = self._local_roi(
-            px, py, cancel_cx, bar_cy, 11.5, 11.5, ox, oy, roi_w, roi_h
+        self._draw_circle_cross_sdf(
+            surf_rgb, px, py, cancel_cx, bar_cy, self._cancel_hover_t, ox, oy
         )
-        if cancel_roi is not None:
-            ys, xs, rpx, rpy = cancel_roi
-            sub = surf_rgb[ys, xs]
-            d_cancel_bg = _sdf_circle(rpx, rpy, cancel_cx, bar_cy, 10.5)
-            bg_alpha = _lerp(0.09, 0.24, self._cancel_hover_t)
-            bg_col = _rgb_norm(
-                _lerp_rgb(WHITE_RGB, ACCENT_RECORDING_RGB, self._cancel_hover_t * 0.65)
-            )
-            cancel_bg_cov = (_sdf_cov(d_cancel_bg) * bg_alpha).astype(np.float32)
-            _blend_surface(sub, cancel_bg_cov, bg_col)
-
-            cross_half = 3.6
-            d_x1 = _sdf_segment(
-                rpx,
-                rpy,
-                cancel_cx - cross_half,
-                bar_cy - cross_half,
-                cancel_cx + cross_half,
-                bar_cy + cross_half,
-                0.95,
-            )
-            d_x2 = _sdf_segment(
-                rpx,
-                rpy,
-                cancel_cx - cross_half,
-                bar_cy + cross_half,
-                cancel_cx + cross_half,
-                bar_cy - cross_half,
-                0.95,
-            )
-            d_cross = np.minimum(d_x1, d_x2)
-            cross_cov = _sdf_cov(d_cross)
-            cross_col = _rgb_norm(
-                _lerp_rgb(CANCEL_ICON_RGB, WHITE_RGB, self._cancel_hover_t)
-            )
-            _blend_surface(sub, cross_cov, cross_col)
 
         # Middle: 1x Segoe UI 12px countdown timer centered symmetrically between waveform & cancel X.
         elapsed = (

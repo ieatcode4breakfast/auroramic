@@ -126,6 +126,13 @@ class AuroraMicApp:
         self._tracker_after_id = None
         if self._stopping:
             return
+        if self.ui is not None and getattr(self.ui, "is_api_key_open", lambda: False)():
+            try:
+                self.ui.set_input_active(False)
+            except Exception as exc:
+                self.logger.debug("Input active tracker error: %s", _sanitize_error(exc))
+            self._schedule_next_track()
+            return
         try:
             self.typer.remember_foreground_window(exclude_hwnd=self._ui_hwnd)
         except Exception as exc:
@@ -177,7 +184,7 @@ class AuroraMicApp:
             with self._state_lock:
                 self._is_recording = False
             self.logger.error("Failed to start recording: %s", _sanitize_error(exc))
-            self._safe_set_state("error", "Mic error")
+            self._safe_set_state("error", "Mic unavailable")
 
     def on_stop_record(self) -> None:
         """Stop recording, transcribe via Groq in a daemon thread, and type result."""
@@ -197,7 +204,9 @@ class AuroraMicApp:
         worker.start()
 
     def _transcribe_and_type(self, target_hwnd: int | None) -> None:
+        fallback_message = "Transcription failed"
         try:
+            fallback_message = "Audio capture failed"
             with self._audio_lock:
                 wav_bytes = self.recorder.stop()
             if not wav_bytes:
@@ -206,12 +215,14 @@ class AuroraMicApp:
                 self._safe_set_state("idle")
                 return
 
+            fallback_message = "Transcription failed"
             text = self.transcriber.transcribe(wav_bytes)
             if text and text.strip():
                 with self._state_lock:
                     should_enter = self._pending_enter_on_finish
                     self._pending_enter_on_finish = False
 
+                fallback_message = "Typing failed"
                 self.typer.type_text(
                     text,
                     target_hwnd=target_hwnd,
@@ -237,7 +248,9 @@ class AuroraMicApp:
             self.logger.error(
                 "Transcription or typing failed: %s", _sanitize_error(exc)
             )
-            self._safe_set_state("error")
+            self._safe_set_state(
+                "error", getattr(exc, "user_message", fallback_message)
+            )
         finally:
             with self._state_lock:
                 self._transcribe_in_flight = False
@@ -330,6 +343,18 @@ class AuroraMicApp:
         except Exception as exc:
             self.logger.error("Send enter failed: %s", _sanitize_error(exc))
 
+    def has_api_key(self) -> bool:
+        """Return True if a non-empty Groq API key is configured in memory."""
+        transcriber_key = (getattr(self.transcriber, "api_key", "") or "").strip()
+        config_key = (getattr(config, "GROQ_API_KEY", "") or "").strip()
+        return bool(transcriber_key or config_key)
+
+    def on_save_api_key(self, raw_key: str) -> None:
+        """Persist the Groq API key to .env and hot-reload runtime config and transcriber."""
+        saved = config.save_groq_api_key(raw_key)
+        self.transcriber.api_key = saved
+        self.logger.info("Groq API key updated")
+
     def on_quit(self) -> None:
         """Stop periodic timers and release recording stream cleanly on exit."""
         self._stopping = True
@@ -363,6 +388,8 @@ class AuroraMicApp:
             on_quit=self.on_quit,
             on_cancel_record=self.on_cancel_record,
             on_send_enter=self.on_send_enter,
+            has_api_key=self.has_api_key,
+            on_save_api_key=self.on_save_api_key,
         )
         if ICO_PATH.is_file():
             try:

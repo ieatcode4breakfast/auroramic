@@ -1,4 +1,4 @@
-"""End-to-end verification for AuroraMic Send/Enter tab, sticky-glow fix, dual-pill 220x164 UI, and main.py."""
+"""End-to-end verification for AuroraMic UI states (recording, error toast, in-app API key entry), Send/Enter tab, sticky-glow fix, and main.py."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from ctypes import wintypes
 import io
 import json
 import logging
+import os
 import sys
 import tempfile
 import threading
@@ -30,7 +31,7 @@ import sounddevice  # noqa: F401
 import config
 import main
 from recorder import AudioRecorder
-from transcriber import GroqTranscriber
+from transcriber import GroqTranscriber, TranscriptionError
 from typer import (
     CURSORINFO,
     GWL_EXSTYLE,
@@ -43,8 +44,20 @@ from typer import (
     WS_EX_TOPMOST,
 )
 from ui import (
+    API_KEY_CANCEL_CX,
+    API_KEY_ENTER_LABEL,
+    API_KEY_INPUT_ROW_CY,
+    API_KEY_PILL_HEIGHT,
+    API_KEY_PILL_WIDTH,
+    API_KEY_SAVE_CX,
+    API_KEY_SIGNUP_CY,
+    API_KEY_SIGNUP_LABEL,
+    API_KEY_UPDATE_LABEL,
+    BAR_CENTER_X,
     BAR_CENTER_Y,
+    ERROR_DURATION_MS,
     FloatingMicUI,
+    GROQ_SIGNUP_URL,
     QUIT_LABEL,
     QUIT_WIN_H,
     QUIT_WIN_W,
@@ -53,6 +66,11 @@ from ui import (
     SEND_TAB_HEIGHT,
     SEND_TAB_LEFT,
     SEND_TAB_RIGHT,
+    TIMER_TEXT_RGB,
+    TOAST_MAX_TEXT_WIDTH,
+    TOAST_MIN_WIDTH,
+    TOAST_PILL_HEIGHT,
+    TOAST_PILL_WIDTH,
     TOP_BUTTON_SIZE,
     TOP_CENTER_X,
     TOP_CENTER_Y,
@@ -766,14 +784,61 @@ def main_verify() -> None:
                     results["auto_60s_flow"] = {"sendinput_events": sum(sendinput_calls), "state": ui._state}
                 finally:
                     cleanup()
-                step_case_quit_popup()
+                wait_for(lambda: ui._state == "idle", step_case_error_toast, timeout=1.5)
 
             wait_for(lambda: ui._state == "success", after_60s, timeout=3.0)
         except BaseException as exc:
             cleanup()
             fail_out(exc)
 
-    # Phase 5I: Custom dark-glass Quit AuroraMic popup (open, outside-click dismiss, inside-click quit)
+    # Phase 5I: Error toast visibility, >1200ms survival, auto-reset, and click-dismiss
+    def step_case_error_toast():
+        try:
+            assert ERROR_DURATION_MS == 2600
+            with patch.object(app.recorder, "start", side_effect=RuntimeError("mic disabled")):
+                ui._on_press(make_mouse_event(TOP_CENTER_X, TOP_CENTER_Y))
+                ui._on_release(make_mouse_event(TOP_CENTER_X, TOP_CENTER_Y))
+            assert ui._state == "error"
+            assert ui._message == "Mic unavailable"
+
+            def check_survives_past_1200ms():
+                try:
+                    assert ui._state == "error", f"Error reset too early: {ui._state!r}"
+                    assert ui._message == "Mic unavailable"
+                    assert ui._bar_vis > 0.95
+
+                    def after_auto_reset():
+                        try:
+                            assert ui._state == "idle"
+                            assert ui._message == ""
+
+                            # Test click-dismiss during active error toast
+                            ui.set_state("error", "Rate limited")
+                            assert ui._state == "error" and ui._message == "Rate limited"
+                            ui._on_press(make_mouse_event(TOP_CENTER_X, TOP_CENTER_Y))
+                            ui._on_release(make_mouse_event(TOP_CENTER_X, TOP_CENTER_Y))
+                            assert ui._state == "idle"
+                            assert ui._dismiss_bar_mode == "error"
+                            assert ui._dismiss_error_message == "Rate limited"
+                            results["error_toast_flow"] = {
+                                "duration_ms": ERROR_DURATION_MS,
+                                "survived_1350ms": True,
+                                "click_dismissed": True,
+                            }
+                        except BaseException as exc:
+                            fail_out(exc)
+                            return
+                        step_case_quit_popup()
+
+                    wait_for(lambda: ui._state == "idle", after_auto_reset, timeout=2.5)
+                except BaseException as exc:
+                    fail_out(exc)
+
+            ui.root.after(1350, check_survives_past_1200ms)
+        except BaseException as exc:
+            fail_out(exc)
+
+    # Phase 5J: Custom dark-glass 2-row right-click menu ("Quit AuroraMic" + "Enter/Update Groq API key")
     def step_case_quit_popup():
         key_state: dict[int, int] = {}
         cur_pos = [500, 500]
@@ -795,14 +860,38 @@ def main_verify() -> None:
             popup = ui._quit_popup
             assert popup is not None and ui._quit_open is False
 
-            # Right-click opens dark-glass layered Quit popup (168x58)
+            orig_env_path = config.ENV_PATH
+            orig_cfg_key = config.GROQ_API_KEY
+            orig_trans_key = app.transcriber.api_key
+            orig_os_key = os.environ.get("GROQ_API_KEY")
+            orig_os_alt = os.environ.get("GROQ_API")
+            tmp_env_path = tmp_state_dir / ".env"
+
+            def restore_env_state() -> None:
+                config.ENV_PATH = orig_env_path
+                config.GROQ_API_KEY = orig_cfg_key
+                app.transcriber.api_key = orig_trans_key
+                if orig_os_key is None:
+                    os.environ.pop("GROQ_API_KEY", None)
+                else:
+                    os.environ["GROQ_API_KEY"] = orig_os_key
+                if orig_os_alt is None:
+                    os.environ.pop("GROQ_API", None)
+                else:
+                    os.environ["GROQ_API"] = orig_os_alt
+
+            # 1) No key present -> right-click menu offers "Enter Groq API key" below Quit
+            config.ENV_PATH = tmp_env_path
+            config.GROQ_API_KEY = ""
+            app.transcriber.api_key = ""
             ui._on_right_click(make_mouse_event(TOP_CENTER_X, TOP_CENTER_Y, 500, 500))
             assert ui._quit_open is True and popup.visible is True
             assert popup.last_ulw_ok is True and popup.last_ulw_error == 0
+            assert popup.api_key_label == API_KEY_ENTER_LABEL
             qrect = wintypes.RECT()
             assert ctypes.windll.user32.GetWindowRect(popup.hwnd, ctypes.byref(qrect))
             q_size = (qrect.right - qrect.left, qrect.bottom - qrect.top)
-            assert q_size == (QUIT_WIN_W, QUIT_WIN_H) == (168, 58), f"Unexpected quit popup size: {q_size}"
+            assert q_size == (QUIT_WIN_W, QUIT_WIN_H) == (198, 100), f"Unexpected quit popup size: {q_size}"
 
             # Simulated desktop left-click outside the pill dismisses without quitting
             pl, pt, pr, pb = popup.pill_rect_screen()
@@ -818,31 +907,87 @@ def main_verify() -> None:
                     assert ui._quit_open is False and popup.visible is False
                     assert app._stopping is False
 
-                    # Re-open via right-click and click inside pill -> cleanly quits
+                    # 2) Re-open -> click Row 1 ("Enter Groq API key") -> reuses bottom pill
                     key_state.clear()
                     cur_pos[0], cur_pos[1] = 500, 500
                     ui._on_right_click(make_mouse_event(TOP_CENTER_X, TOP_CENTER_Y, 500, 500))
-                    assert ui._quit_open is True and popup.visible is True
+                    assert ui._quit_open is True and popup.api_key_label == API_KEY_ENTER_LABEL
+                    kl, kt, kr, kb = popup.api_key_item_rect_screen()
+                    kcx = int(round(0.5 * (kl + kr)))
+                    kcy = int(round(0.5 * (kt + kb)))
+                    ui._on_quit_release(make_mouse_event(10, 10, kcx, kcy))
+                    assert ui._quit_open is False
+                    assert ui._state == "api_key" and ui.is_api_key_open() is True
+                    assert ui._api_key_entry is not None and ui._api_key_entry.cget("show") == "•"
 
-                    rl, rt, rr, rb = popup.pill_rect_screen()
-                    cx = int(round(0.5 * (rl + rr)))
-                    cy = int(round(0.5 * (rt + rb)))
-                    cur_pos[0], cur_pos[1] = cx, cy
+                    # Verify foreground tracker skips overwriting target HWND while Entry overlay is open
+                    with patch.object(app.typer, "remember_foreground_window") as mock_rem:
+                        with patch.object(app.typer, "is_input_active", return_value=True):
+                            app._track_foreground_tick()
+                    assert mock_rem.call_count == 0
+                    assert ui._input_active is False
+
+                    # Verify signup button opens https://console.groq.com/keys without dismissing
+                    opened_urls: list[str] = []
+                    with patch("ui.webbrowser.open", side_effect=lambda u, **_kw: opened_urls.append(u)):
+                        ui._on_press(make_mouse_event(BAR_CENTER_X, API_KEY_SIGNUP_CY))
+                        ui._on_release(make_mouse_event(BAR_CENTER_X, API_KEY_SIGNUP_CY))
+                    assert opened_urls == [GROQ_SIGNUP_URL]
+                    assert ui._state == "api_key"
+
+                    # Submit empty stays open & sets shake timestamp
+                    ui._on_press(make_mouse_event(API_KEY_SAVE_CX, API_KEY_INPUT_ROW_CY))
+                    ui._on_release(make_mouse_event(API_KEY_SAVE_CX, API_KEY_INPUT_ROW_CY))
+                    assert ui._state == "api_key" and ui._api_key_shake_at > 0.0
+
+                    # Enter dummy key cleanly -> saves to temp .env, hot-reloads app, switches to Update label
+                    ui._api_key_var.set("gsk_e2e_test_value_123")
+                    ui._on_press(make_mouse_event(API_KEY_SAVE_CX, API_KEY_INPUT_ROW_CY))
+                    ui._on_release(make_mouse_event(API_KEY_SAVE_CX, API_KEY_INPUT_ROW_CY))
+                    assert app.transcriber.api_key == "gsk_e2e_test_value_123"
+                    assert config.GROQ_API_KEY == "gsk_e2e_test_value_123"
+                    assert tmp_env_path.read_text(encoding="utf-8") == "GROQ_API_KEY=gsk_e2e_test_value_123\n"
+                    assert ui._state == "success"
+                    assert ui._api_key_var.get() == ""
+
+                    # 3) Re-open right-click menu -> label is now "Update Groq API key"; test Cancel button
+                    ui._on_right_click(make_mouse_event(TOP_CENTER_X, TOP_CENTER_Y, 500, 500))
+                    assert popup.api_key_label == API_KEY_UPDATE_LABEL
+                    kl2, kt2, kr2, kb2 = popup.api_key_item_rect_screen()
+                    ui._on_quit_release(
+                        make_mouse_event(10, 10, int(round(0.5 * (kl2 + kr2))), int(round(0.5 * (kt2 + kb2))))
+                    )
+                    assert ui._state == "api_key"
+                    ui._on_press(make_mouse_event(API_KEY_CANCEL_CX, API_KEY_INPUT_ROW_CY))
+                    ui._on_release(make_mouse_event(API_KEY_CANCEL_CX, API_KEY_INPUT_ROW_CY))
+                    assert ui._state == "idle" and ui.is_api_key_open() is False
+
+                    # 4) Re-open and click Row 0 ("Quit AuroraMic") -> cleanly quits
+                    ui._on_right_click(make_mouse_event(TOP_CENTER_X, TOP_CENTER_Y, 500, 500))
+                    assert ui._quit_open is True and popup.visible is True
+                    ql, qt, qr, qb = popup.quit_item_rect_screen()
+                    qcx = int(round(0.5 * (ql + qr)))
+                    qcy = int(round(0.5 * (qt + qb)))
+                    cur_pos[0], cur_pos[1] = qcx, qcy
                     results["quit_popup"] = {
                         "size": q_size,
                         "outside_dismissed": True,
+                        "api_key_flow": "verified",
                         "ulw": (popup.last_ulw_ok, popup.last_ulw_error),
                     }
                     stop_quit_patches()
-                    ui._on_quit_release(make_mouse_event(10, 10, cx, cy))
+                    restore_env_state()
+                    ui._on_quit_release(make_mouse_event(10, 10, qcx, qcy))
                     assert ui._quit_open is False
                 except BaseException as exc:
                     stop_quit_patches()
+                    restore_env_state()
                     fail_out(exc)
 
             wait_for(lambda: not ui._quit_open, after_outside_dismiss, timeout=1.5)
         except BaseException as exc:
             stop_quit_patches()
+            restore_env_state()
             fail_out(exc)
 
     ui.root.after(100, step_test_sticky_glow_and_passive_ibeam)
@@ -905,8 +1050,303 @@ def main_verify() -> None:
         default_state_patch.stop()
         tmp_state_ctx.cleanup()
 
+    test_transcription_error_mapping()
+    test_error_toast_truncation_and_rendering()
+    test_app_error_toast_wiring()
+
     print(f"app integration OK: {results}")
     print("ALL_E2E_CHECKS_PASSED")
+
+
+def test_transcription_error_mapping() -> None:
+    """Verify TranscriptionError carries concise UI messages while preserving redacted details."""
+    wav = make_silent_wav(0.25)
+
+    # Missing API key
+    tr_missing = GroqTranscriber(api_key="")
+    try:
+        tr_missing.transcribe(wav)
+        raise AssertionError("Expected TranscriptionError for missing key")
+    except TranscriptionError as exc:
+        assert isinstance(exc, RuntimeError)
+        assert exc.user_message == "No API key — check .env"
+        assert "GROQ_API_KEY" in str(exc)
+
+    tr = GroqTranscriber(api_key="gsk_secret_token_123")
+
+    # TimeoutException -> Request timed out
+    with patch("transcriber.httpx.Client") as mock_client:
+        mock_client.return_value.__enter__.return_value.post.side_effect = (
+            httpx.ReadTimeout("timed out gsk_secret_token_123")
+        )
+        try:
+            tr.transcribe(wav)
+            raise AssertionError("Expected TranscriptionError on timeout")
+        except TranscriptionError as exc:
+            assert exc.user_message == "Request timed out"
+            assert "gsk_secret_token_123" not in str(exc)
+            assert "[REDACTED]" in str(exc)
+
+    # Other HTTPError -> Network error
+    with patch("transcriber.httpx.Client") as mock_client:
+        mock_client.return_value.__enter__.return_value.post.side_effect = (
+            httpx.ConnectError("dns fail")
+        )
+        try:
+            tr.transcribe(wav)
+            raise AssertionError("Expected TranscriptionError on network error")
+        except TranscriptionError as exc:
+            assert exc.user_message == "Network error"
+
+    # HTTP status codes
+    status_expectations = [
+        (401, "API key rejected"),
+        (403, "API key rejected"),
+        (413, "Audio too long"),
+        (429, "Rate limited"),
+        (400, "API error (400)"),
+        (500, "Service error"),
+        (503, "Service error"),
+    ]
+    for code, expected_msg in status_expectations:
+        fake_resp = types.SimpleNamespace(
+            status_code=code,
+            reason_phrase="Err",
+            text=f"error detail gsk_secret_token_123 ({code})",
+            json=lambda: {"error": {"message": f"detail gsk_secret_token_123 ({code})"}},
+        )
+        with patch("transcriber.httpx.Client") as mock_client:
+            mock_client.return_value.__enter__.return_value.post.return_value = fake_resp
+            try:
+                tr.transcribe(wav)
+                raise AssertionError(f"Expected TranscriptionError for HTTP {code}")
+            except TranscriptionError as exc:
+                assert exc.user_message == expected_msg, (
+                    f"HTTP {code}: expected {expected_msg!r}, got {exc.user_message!r}"
+                )
+                assert "gsk_secret_token_123" not in str(exc)
+                assert "[REDACTED]" in str(exc)
+
+    # Invalid JSON
+    bad_json_resp = types.SimpleNamespace(
+        status_code=200,
+        reason_phrase="OK",
+        text="not-json",
+        json=lambda: (_ for _ in ()).throw(ValueError("bad json")),
+    )
+    with patch("transcriber.httpx.Client") as mock_client:
+        mock_client.return_value.__enter__.return_value.post.return_value = bad_json_resp
+        try:
+            tr.transcribe(wav)
+            raise AssertionError("Expected TranscriptionError for invalid JSON")
+        except TranscriptionError as exc:
+            assert exc.user_message == "Invalid API response"
+
+
+def test_error_toast_truncation_and_rendering() -> None:
+    """Verify long toast messages truncate with '…', fit inside 188x38, and render cleanly."""
+    with tempfile.TemporaryDirectory() as td:
+        ui = FloatingMicUI(
+            lambda: None,
+            lambda: None,
+            lambda: 0.0,
+            state_path=Path(td) / "state.json",
+        )
+        try:
+            long_msg = (
+                "An extraordinarily verbose error message with\nnewlines   that "
+                "must truncate cleanly before overflowing the pill"
+            )
+            truncated = ui._truncate_message(long_msg)
+            assert "\n" not in truncated
+            assert truncated.endswith("…"), f"Expected trailing ellipsis, got {truncated!r}"
+            assert not truncated.endswith(" …"), f"Unexpected space before ellipsis: {truncated!r}"
+            assert ui._measure_message_width(truncated) <= TOAST_MAX_TEXT_WIDTH
+
+            mask = ui._get_message_mask(long_msg)
+            assert mask.shape[1] <= TOAST_MAX_TEXT_WIDTH + 6
+            assert float(mask.max()) > 0.5
+
+            # Render full error frame and check pill dimensions & 10px gap
+            ui._apply_state("error", long_msg)
+            t = ui._state_entered_at
+            for _ in range(30):
+                t += 0.016
+                ui._step_animation(t, 0.016)
+            err_frame = ui._render_frame(t)
+            tx0, ty0, tx1, ty1 = alpha_bbox(err_frame[:92, :147, :], min_alpha=245)
+            bx0, by0, bx1, by1 = alpha_bbox(err_frame[92:, :, :], min_alpha=245)
+            by0_abs, by1_abs = by0 + 92, by1 + 92
+            toast_size = (bx1 - bx0 + 1, by1_abs - by0_abs + 1)
+            gap = by0_abs - ty1 - 1
+            assert toast_size == (int(TOAST_PILL_WIDTH), int(TOAST_PILL_HEIGHT)), (
+                f"Expected ({TOAST_PILL_WIDTH}, {TOAST_PILL_HEIGHT}), got {toast_size}"
+            )
+            assert gap == 10, f"Expected 10px gap below top ring, got {gap}"
+
+            # Text pixels in TIMER_TEXT_RGB are rendered inside the toast pill
+            pill_interior = err_frame[by0_abs + 6 : by1_abs - 5, bx0 + 10 : bx1 - 9, :3]
+            bright_px = int(
+                np.sum(
+                    (pill_interior[:, :, 0] >= TIMER_TEXT_RGB[0] - 25)
+                    & (pill_interior[:, :, 1] >= TIMER_TEXT_RGB[1] - 25)
+                    & (pill_interior[:, :, 2] >= TIMER_TEXT_RGB[2] - 25)
+                )
+            )
+            assert bright_px >= 40, f"Expected rendered toast text pixels, got {bright_px}"
+
+            # Short message uses compact TOAST_MIN_WIDTH
+            ui._apply_state("error", "Rate limited")
+            t = ui._state_entered_at
+            for _ in range(30):
+                t += 0.016
+                ui._step_animation(t, 0.016)
+            short_frame = ui._render_frame(t)
+            sx0, sy0, sx1, sy1 = alpha_bbox(short_frame[92:, :, :], min_alpha=245)
+            assert (sx1 - sx0 + 1) == int(TOAST_MIN_WIDTH)
+
+            # Transitioning error -> idle retains toast mode & message while fading out
+            ui._apply_state("idle", "")
+            assert ui._bar_vis > 0.9
+            spec = ui._resolve_bottom_bar_spec()
+            assert spec[0] == "error" and spec[4] == "Rate limited"
+        finally:
+            ui.stop()
+
+
+def test_error_state_survives_past_1200ms() -> None:
+    """Verify set_state('error', msg) keeps _message and remains in error past 1200ms."""
+    assert ERROR_DURATION_MS == 2600
+    with tempfile.TemporaryDirectory() as td:
+        ui = FloatingMicUI(
+            lambda: None,
+            lambda: None,
+            lambda: 0.0,
+            state_path=Path(td) / "state.json",
+        )
+        observed: dict[str, object] = {}
+
+        def check_1350ms() -> None:
+            observed["state_at_1350ms"] = ui._state
+            observed["message_at_1350ms"] = ui._message
+            ui.stop()
+
+        ui.set_state("error", "API key rejected")
+        assert ui._state == "error"
+        assert ui._message == "API key rejected"
+        ui.root.after(1350, check_1350ms)
+        ui.run()
+
+        assert observed == {
+            "state_at_1350ms": "error",
+            "message_at_1350ms": "API key rejected",
+        }
+
+
+def test_app_error_toast_wiring() -> None:
+    """Verify AuroraMicApp passes concise user_message strings on mic and transcription errors."""
+    test_logger = logging.getLogger("auroramic.test_errors")
+    test_logger.handlers.clear()
+    test_logger.addHandler(logging.NullHandler())
+
+    calls: list[tuple[str, str]] = []
+
+    class DummyUI:
+        def __init__(self) -> None:
+            self.hwnd = 0
+
+        def set_state(self, state: str, message: str = "") -> None:
+            calls.append((state, message))
+
+    app = main.AuroraMicApp(logger=test_logger)
+    app.ui = DummyUI()  # type: ignore[assignment]
+
+    with patch.object(app.recorder, "start", side_effect=RuntimeError("no mic")):
+        app.on_start_record()
+    assert calls[-1] == ("error", "Mic unavailable")
+
+    wav = make_silent_wav(0.25)
+    with patch.object(app.recorder, "stop", return_value=wav):
+        with patch.object(
+            app.transcriber,
+            "transcribe",
+            side_effect=TranscriptionError("HTTP 429 full detail", "Rate limited"),
+        ):
+            app._transcribe_and_type(None)
+    assert calls[-1] == ("error", "Rate limited")
+
+    with patch.object(app.recorder, "stop", return_value=wav):
+        with patch.object(
+            app.transcriber,
+            "transcribe",
+            side_effect=RuntimeError("unexpected crash"),
+        ):
+            app._transcribe_and_type(None)
+    assert calls[-1] == ("error", "Transcription failed")
+
+
+def test_api_key_container_render_and_env_preservation() -> None:
+    """Verify reused bottom pill geometry, signup link mask, and .env comment/key preservation."""
+    with tempfile.TemporaryDirectory() as td:
+        env_file = Path(td) / ".env"
+        env_file.write_text("# comment\nFOO=bar\nGROQ_API=legacy_val\nGROQ_API_KEY=old_val\n", encoding="utf-8")
+        cleaned = config.save_groq_api_key('  "gsk_unit_clean_999"  ', env_path=env_file)
+        assert cleaned == "gsk_unit_clean_999"
+        content = env_file.read_text(encoding="utf-8")
+        assert "# comment\nFOO=bar\n" in content
+        assert "GROQ_API=" not in content
+        assert "GROQ_API_KEY=gsk_unit_clean_999\n" in content
+
+        has_key = [False]
+        opened: list[str] = []
+        saved_keys: list[str] = []
+        ui = FloatingMicUI(
+            lambda: None,
+            lambda: None,
+            lambda: 0.0,
+            state_path=Path(td) / "state.json",
+            has_api_key=lambda: has_key[0],
+            on_save_api_key=lambda k: (saved_keys.append(k), has_key.__setitem__(0, True)),
+            open_signup_url=lambda u: opened.append(u),
+        )
+        try:
+            assert ui._quit_popup is not None
+            assert API_KEY_SIGNUP_LABEL == "Sign up for a free Groq API key"
+            assert ui._signup_mask.max() > 0.8
+
+            ui._show_quit_popup(400, 300)
+            assert ui._quit_popup.api_key_label == API_KEY_ENTER_LABEL
+            img_enter = ui._quit_popup.render(1.0, 0.0, 1.0, has_key=False)
+            assert img_enter.shape == (QUIT_WIN_H, QUIT_WIN_W, 4)
+
+            kl, kt, kr, kb = ui._quit_popup.api_key_item_rect_screen()
+            ui._on_quit_release(make_mouse_event(10, 10, 0.5 * (kl + kr), 0.5 * (kt + kb)))
+            assert ui._state == "api_key"
+
+            # Advance bottom bar animation to full visibility and check rendered 194x55 pill
+            t = ui._state_entered_at
+            for _ in range(30):
+                t += 0.016
+                ui._step_animation(t, 0.016)
+            assert ui._bar_vis > 0.99
+            frame = ui._render_frame(t)
+            x0, y0, x1, y1 = alpha_bbox(frame[92:, :, :], min_alpha=245)
+            assert (x1 - x0 + 1) == int(API_KEY_PILL_WIDTH)
+            assert (y1 - y0 + 1) == int(API_KEY_PILL_HEIGHT)
+
+            ui._on_press(make_mouse_event(BAR_CENTER_X, API_KEY_SIGNUP_CY))
+            ui._on_release(make_mouse_event(BAR_CENTER_X, API_KEY_SIGNUP_CY))
+            assert opened == [GROQ_SIGNUP_URL]
+
+            ui._api_key_var.set("gsk_updated_888")
+            ui._submit_api_key()
+            assert saved_keys == ["gsk_updated_888"]
+            assert ui._state == "success"
+
+            ui._show_quit_popup(400, 300)
+            assert ui._quit_popup.api_key_label == API_KEY_UPDATE_LABEL
+        finally:
+            ui.stop()
 
 
 def test_auroramic_e2e() -> None:
