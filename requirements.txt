@@ -1,0 +1,6 @@
+httpx
+python-dotenv
+pillow
+pywin32
+numpy
+sounddevice
